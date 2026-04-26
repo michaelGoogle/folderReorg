@@ -1,0 +1,12 @@
+[Unit]
+Description=Folder-Reorg KB (Personal) — nightly delta scan at 02:00
+Requires=folderreorg-kb-personal.service
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=folderreorg-kb-personal.service
+
+[Install]
+WantedBy=timers.target

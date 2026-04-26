@@ -1,0 +1,13 @@
+[Unit]
+Description=Folder-Reorg KB (360F) — nightly delta scan at 02:15
+Requires=folderreorg-kb-360f.service
+
+[Timer]
+# 15 min after the Personal scan, so they don't compete for GPU/CPU
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=folderreorg-kb-360f.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Folder-Reorg KB — nightly delta scan at 02:00
+Requires=folderreorg-kb.service
+
+[Timer]
+# Every day at 02:00 local time. If aizh was powered off at that hour,
+# Persistent=true runs the job as soon as it boots again.
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=folderreorg-kb.service
+
+[Install]
+WantedBy=timers.target

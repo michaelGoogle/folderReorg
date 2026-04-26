@@ -1,0 +1,16 @@
+[Unit]
+Description=Folder-Reorg KB (360F) — daily delta scan
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/michael.gerber/folderReorg
+Environment=PATH=/home/michael.gerber/folderReorg/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=KB_VARIANT=360f
+# Ensure the NAS is mounted (idempotent — no-op if already mounted)
+ExecStartPre=/bin/bash /home/michael.gerber/folderReorg/kb/mount_nas.sh
+ExecStart=/home/michael.gerber/folderReorg/.venv/bin/python -m kb.scheduled
+StandardOutput=journal
+StandardError=journal
+SuccessExitStatus=0 1

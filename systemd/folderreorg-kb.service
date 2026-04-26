@@ -1,0 +1,16 @@
+[Unit]
+Description=Folder-Reorg Knowledge Base — daily delta scan
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/michael.gerber/folderReorg
+Environment=PATH=/home/michael.gerber/folderReorg/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Ensure the NAS is mounted (idempotent — no-op if already mounted)
+ExecStartPre=/bin/bash /home/michael.gerber/folderReorg/kb/mount_nas.sh
+ExecStart=/home/michael.gerber/folderReorg/.venv/bin/python -m kb.scheduled
+StandardOutput=journal
+StandardError=journal
+# Non-fatal exit codes (some files skipped) still count as success
+SuccessExitStatus=0 1

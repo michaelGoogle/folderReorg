@@ -1,0 +1,30 @@
+# Normalize text files to LF in the repo. Windows checkouts will get LF
+# (no CRLF translation) so files run correctly on aizh after a fresh clone.
+* text=auto eol=lf
+
+# Shell scripts MUST be LF — CRLF makes bash refuse to run them.
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Service / timer unit files are read by systemd and should be LF.
+*.service text eol=lf
+*.timer   text eol=lf
+
+# Python files (no per-OS difference but be explicit)
+*.py text eol=lf
+
+# Docs
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+
+# Binary types — never touch
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.zip binary
+*.gz  binary
+*.npy binary
+*.bin binary

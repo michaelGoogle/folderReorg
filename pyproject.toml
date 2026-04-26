@@ -1,0 +1,32 @@
+[project]
+name = "folder-reorg"
+version = "0.1.0"
+description = "LLM-assisted folder reorganization pipeline (per Folder Reorganization Project Plan.md)"
+requires-python = ">=3.11"
+dependencies = [
+    # Core
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "tqdm>=4.66",
+    "requests>=2.31",
+    # Document extraction
+    "pymupdf>=1.24",            # PDF text extraction
+    "python-docx>=1.1",         # .docx
+    "openpyxl>=3.1",            # .xlsx
+    # Embeddings & clustering
+    "sentence-transformers>=3.0",
+    "hdbscan>=0.8.33",
+    "scikit-learn>=1.4",
+    "torch>=2.2",               # CUDA build picked up from system/uv
+    # Language detection
+    "lingua-language-detector>=2.0",  # pure-Python, numpy-2 compatible (fasttext-wheel is broken on np 2.x)
+    # Review UI
+    "streamlit>=1.35",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.4", "pytest>=8.0"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
