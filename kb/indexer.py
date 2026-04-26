@@ -331,6 +331,14 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
     counts = {"new": 0, "updated": 0, "unchanged": 0, "deleted": 0,
               "skip": 0, "chunks_added": 0}
     errors: list[str] = []
+    # Per-file skip records: {"path": "<rel>", "reason": "<reason>"} entries.
+    # Capped at MAX_SKIPPED_RECORDED to keep the per-root JSON small even on
+    # roots with thousands of unsupported files (e.g. image dumps).
+    MAX_SKIPPED_RECORDED = 1000
+    skipped: list[dict] = []
+    skipped_overflow = 0
+    # Per-file deletion records (rel paths only — no ambiguity to capture).
+    deleted_paths: list[str] = []
 
     files = [p for p in root_path.rglob("*") if p.is_file()]
     for p in tqdm(files, unit="file", desc=f"index {root_name}"):
@@ -344,6 +352,11 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
             continue
         if status.startswith("skip:"):
             counts["skip"] += 1
+            reason = status.split(":", 1)[1] if ":" in status else "unknown"
+            if len(skipped) < MAX_SKIPPED_RECORDED:
+                skipped.append({"path": str(rel), "reason": reason})
+            else:
+                skipped_overflow += 1
         else:
             counts[status] = counts.get(status, 0) + 1
             counts["chunks_added"] += nc
@@ -353,8 +366,12 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
     for rp in disappeared:
         _delete_file_chunks(client, root_name, rp)
         counts["deleted"] += 1
+        deleted_paths.append(rp)
 
     counts["errors"] = errors
+    counts["skipped"] = skipped                  # NEW: per-file skip records
+    counts["skipped_overflow"] = skipped_overflow  # # NOT recorded beyond cap
+    counts["deleted_paths"] = deleted_paths        # NEW: which files vanished
     counts["root"] = root_name
     counts["root_path"] = str(root_path)
     counts["scanned_files"] = len(files)
