@@ -94,11 +94,26 @@ def _render_source(s: dict, idx_key: str) -> None:
     mime, _ = mimetypes.guess_type(s["filename"])
     mime = mime or "application/octet-stream"
 
+    # "Synthetic" matches were indexed by filename + folder context only
+    # (no text content was extractable — e.g. ZIP, image, OCR-empty PDF).
+    # Show a small badge so the user knows the match is shallower than a
+    # real-content match.
+    is_synthetic = s.get("text_source") == "synthetic"
+
     # Single inline row: filename | Preview | Download | Expand
     col_name, col_prev, col_dl, col_exp = st.columns([5, 1.4, 1.4, 1.2])
 
     with col_name:
-        st.markdown(f"**{s['filename']}**")
+        if is_synthetic:
+            st.markdown(
+                f"**{s['filename']}**  "
+                f"<span style='font-size:0.75em;background:#FFF3CD;"
+                f"color:#664D03;padding:1px 6px;border-radius:8px;"
+                f"margin-left:6px;'>📁 filename match</span>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(f"**{s['filename']}**")
 
     with col_prev:
         if abs_path:
@@ -149,6 +164,15 @@ def _render_source(s: dict, idx_key: str) -> None:
         if not abs_path:
             st.caption(f"⚠ file not reachable on aizh "
                        f"(root={s.get('root') or '?'})")
+        if is_synthetic:
+            ext_status = s.get("extraction_status", "?")
+            st.info(
+                f"📁 **Filename / folder match** — no document text was "
+                f"extractable from this file (extraction status: "
+                f"`{ext_status}`). The match is based on the filename, "
+                f"folder hierarchy, and metadata derivable from the "
+                f"naming convention (compound · date · description)."
+            )
         st.code(s["text"][:800], language=None)
 
 
@@ -318,6 +342,8 @@ if query:
                     "filename": s.filename, "rel_path": s.rel_path,
                     "compound": s.compound, "yymm": s.yymm, "language": s.language,
                     "score": s.score, "text": s.text, "root": s.root,
+                    "text_source": getattr(s, "text_source", "extracted"),
+                    "extraction_status": getattr(s, "extraction_status", "ok"),
                 }
                 for s in result.sources
             ]

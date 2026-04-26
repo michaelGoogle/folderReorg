@@ -118,6 +118,11 @@ def ensure_collection(client=None) -> None:
             ("yymm", qm.PayloadSchemaType.KEYWORD),
             ("compound", qm.PayloadSchemaType.KEYWORD),
             ("file_id", qm.PayloadSchemaType.KEYWORD),
+            # New: discriminate filename-only matches from real-content
+            # matches in chat. Lets users filter to "extracted" only or
+            # "synthetic" only via a query-time payload filter.
+            ("text_source", qm.PayloadSchemaType.KEYWORD),
+            ("extraction_status", qm.PayloadSchemaType.KEYWORD),
         ]:
             try:
                 client.create_payload_index(
@@ -189,6 +194,102 @@ def _point_id(sha: str, chunk_id: int) -> str:
     return str(uuid.uuid5(_UUID_NS, f"{sha}:{chunk_id}"))
 
 
+# Pretty type labels for known extensions (used by _synthetic_context_doc).
+# Anything not in this map is described as "<ext> file".
+_EXT_LABELS: dict[str, str] = {
+    # archives
+    ".zip": "ZIP archive", ".rar": "RAR archive", ".7z": "7-Zip archive",
+    ".tar": "TAR archive", ".gz": "gzip-compressed file", ".bz2": "bzip2 file",
+    # images
+    ".jpg": "JPEG image", ".jpeg": "JPEG image", ".png": "PNG image",
+    ".heic": "HEIC image", ".tiff": "TIFF image", ".tif": "TIFF image",
+    ".webp": "WebP image", ".bmp": "BMP image", ".gif": "GIF image",
+    ".svg": "SVG image",
+    # video
+    ".mp4": "MP4 video", ".mov": "QuickTime video", ".avi": "AVI video",
+    ".mkv": "Matroska video", ".webm": "WebM video", ".m4v": "M4V video",
+    # audio
+    ".mp3": "MP3 audio", ".wav": "WAV audio", ".m4a": "M4A audio",
+    ".flac": "FLAC audio", ".ogg": "OGG audio",
+    # documents
+    ".pdf": "PDF document", ".docx": "Word document", ".doc": "Word document",
+    ".xlsx": "Excel spreadsheet", ".xls": "Excel spreadsheet",
+    ".xlsm": "Excel macro spreadsheet", ".pptx": "PowerPoint presentation",
+    ".ppt": "PowerPoint presentation", ".rtf": "Rich Text document",
+    # disk / installer
+    ".dmg": "macOS disk image", ".iso": "ISO disk image",
+    ".pkg": "macOS installer package", ".exe": "Windows executable",
+    ".msi": "Windows installer",
+    # data
+    ".json": "JSON file", ".xml": "XML file", ".yaml": "YAML file",
+    ".yml": "YAML file", ".csv": "CSV file", ".tsv": "TSV file",
+}
+
+_STATUS_NOTES: dict[str, str] = {
+    "unsupported": "no text extractor for this file type",
+    "password":    "encrypted; requires password to extract text",
+    "corrupt":     "file could not be parsed (corrupt or unreadable)",
+    "too_large":   "file too large to extract (over the size limit)",
+    "empty":       "file processed but contained no extractable text",
+    "no_chunks":   "extracted text was too short to chunk",
+    "unreadable":  "file unreadable (permissions or filesystem error)",
+}
+
+
+def _synthetic_context_doc(rel_path: Path, abs_path: Path, status: str,
+                           conv: dict, size_bytes: int) -> str:
+    """
+    Build a small "document" for files where text extraction failed,
+    using the filename, folder hierarchy, and any metadata derivable
+    from the naming convention. The result embeds reasonably well in
+    the same semantic space as real documents because the user's
+    restructured tree already encodes meaning in paths
+    (e.g. "G - Gesundheit Health / GH - Doctors / GHD 2401 MRI scan
+    results.pdf" semantically embeds near "MRI", "scan", "results",
+    "Health", "Doctors").
+
+    Stored as the chunk's `text` payload in Qdrant alongside the
+    `text_source: "synthetic"` marker so the chat UI can label results
+    as filename / folder matches rather than content matches.
+    """
+    parts = list(rel_path.parts)
+    folders = parts[:-1]
+    filename = parts[-1] if parts else abs_path.name
+
+    ext = abs_path.suffix.lower()
+    type_label = _EXT_LABELS.get(ext, f"{(ext or 'binary').lstrip('.')} file")
+    note = _STATUS_NOTES.get(status, status or "no text content")
+
+    lines: list[str] = []
+    lines.append(f"File: {filename}")
+    lines.append(f"Type: {type_label}")
+    lines.append(f"Note: {note}")
+    if size_bytes:
+        # Human-friendly size — keeps the embedding short
+        if size_bytes >= 1024 * 1024:
+            sz = f"{size_bytes / (1024 * 1024):.1f} MB"
+        elif size_bytes >= 1024:
+            sz = f"{size_bytes / 1024:.1f} KB"
+        else:
+            sz = f"{size_bytes} bytes"
+        lines.append(f"Size: {sz}")
+    if folders:
+        lines.append(f"Folder hierarchy: {' / '.join(folders)}")
+    if conv.get("yymm"):
+        yymm = conv["yymm"]
+        if len(yymm) == 4 and yymm.isdigit():
+            yy, mm = yymm[:2], yymm[2:4]
+            year = f"20{yy}" if int(yy) < 90 else f"19{yy}"
+            lines.append(f"Date (from filename): {year}-{mm}")
+    if conv.get("descriptive"):
+        lines.append(f"Description: {conv['descriptive']}")
+    if conv.get("shortcut"):
+        lines.append(f"Compound shortcut: {conv['shortcut']}")
+    if conv.get("status_marker"):
+        lines.append(f"Status marker: {conv['status_marker']}")
+    return "\n".join(lines)
+
+
 # --- Indexing one file -----------------------------------------------------
 
 
@@ -254,19 +355,32 @@ def index_file(client, root_name: str, root_path: Path, rel_path: Path,
 
     # ---------- Slow path: content actually changed (or brand-new file) ----
     res = extract(abs_path)
-    if res.status != "ok" or not res.text.strip():
-        # Purge any stale chunks for this path; don't re-index
-        _delete_file_chunks(client, root_name, str(rel_path))
-        return (f"skip:{res.status or 'empty'}", 0)
+    conv = parse_convention(abs_path.name)
+    # If text extraction succeeded with real content, use it as-is.
+    # Otherwise fall back to a synthetic context document built from the
+    # filename + folder hierarchy + parsed convention metadata. This makes
+    # ZIP archives, image-only PDFs (where OCR yielded nothing), raw
+    # images, videos, and any other unindexable file type discoverable
+    # via filename / folder semantics in chat search.
+    if res.status == "ok" and res.text.strip():
+        text = res.text
+        text_source = "extracted"
+    else:
+        text = _synthetic_context_doc(rel_path, abs_path, res.status, conv,
+                                      current_size)
+        text_source = "synthetic"
+        if not text.strip():
+            # Truly nothing to embed (no filename, no path) — give up.
+            _delete_file_chunks(client, root_name, str(rel_path))
+            return (f"skip:{res.status or 'empty'}", 0)
 
-    chunks = split_text(res.text)
+    chunks = split_text(text)
     if not chunks:
         _delete_file_chunks(client, root_name, str(rel_path))
         return ("skip:no_chunks", 0)
 
     vecs = embed(chunks)
-    lang, lang_conf = detect_language(res.text)
-    conv = parse_convention(abs_path.name)
+    lang, lang_conf = detect_language(text)
     # `stat` + `current_mtime` + `current_size` were computed at the top of
     # this function; reuse instead of stat()ing again (extra NAS round-trip).
     file_id_hex = hashlib.sha256(str(abs_path).encode("utf-8")).hexdigest()[:16]
@@ -302,6 +416,13 @@ def index_file(client, root_name: str, root_path: Path, rel_path: Path,
                 "status_marker": conv.get("status_marker"),
                 "file_id": file_id_hex,
                 "indexed_at": datetime.now().isoformat(timespec="seconds"),
+                # NEW: how the chunk's text was sourced. "extracted" =
+                # real document text; "synthetic" = built from filename +
+                # folder + convention because the file has no extractable
+                # text (binary, archive, OCR-empty image, etc.). Chat UI
+                # uses this to label results as "filename match".
+                "text_source": text_source,
+                "extraction_status": res.status,
             },
         ))
     client.upsert(collection_name=QDRANT_COLLECTION, points=points, wait=False)

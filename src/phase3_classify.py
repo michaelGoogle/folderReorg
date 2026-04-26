@@ -423,7 +423,18 @@ def main() -> None:
     df = inv.merge(ext, on="file_id", how="left")
     df = df.merge(lang, on="file_id", how="left")
     df = df.merge(clu, on="file_id", how="left")
-    df = df.merge(catalog[["cluster_id", "folder_name"]], on="cluster_id", how="left")
+    # The catalog can be empty when HDBSCAN produced 0 real clusters
+    # (all files classified as noise / cluster_id == -1). This happens for
+    # very small subsets where min_cluster_size can't be satisfied. In
+    # that case we add an empty `folder_name` column manually so the
+    # downstream code that expects it doesn't KeyError, and every file
+    # falls through to Case B/C naming (which doesn't need a cluster).
+    if not catalog.empty and {"cluster_id", "folder_name"}.issubset(catalog.columns):
+        df = df.merge(catalog[["cluster_id", "folder_name"]],
+                      on="cluster_id", how="left")
+    else:
+        print(f"  (no clusters produced — every file will use Case B/C naming)")
+        df["folder_name"] = pd.NA
     df["version"] = DEFAULT_VERSION_UNVERSIONED
 
     rows: list[dict] = []

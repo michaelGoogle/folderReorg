@@ -12,7 +12,11 @@ dependencies = [
     # Document extraction
     "pymupdf>=1.24",            # PDF text extraction
     "python-docx>=1.1",         # .docx
-    "openpyxl>=3.1",            # .xlsx
+    "openpyxl>=3.1",            # .xlsx / .xlsm
+    "xlrd>=2.0",                # .xls (legacy Excel, pre-2007)
+    "python-pptx>=1.0",         # .pptx
+    # NOTE: .doc requires the system binary `antiword` (apt install antiword).
+    # NOTE: .ppt has no lightweight extractor — falls back to synthetic context.
     # Embeddings & clustering
     "sentence-transformers>=3.0",
     "hdbscan>=0.8.33",

@@ -144,7 +144,12 @@ OCR_LANGS = os.environ.get("KB_OCR_LANGS", "deu+eng")
 OCR_DPI = int(os.environ.get("KB_OCR_DPI", "200"))
 OCR_WORKERS = int(os.environ.get("KB_OCR_WORKERS", "4"))
 
-TEXT_EXTS = {".pdf", ".docx", ".doc", ".xlsx", ".xlsm", ".xls",
+TEXT_EXTS = {".pdf",
+             ".docx", ".doc",                  # Word (modern + legacy via antiword)
+             ".xlsx", ".xlsm", ".xls",         # Excel (modern + legacy via xlrd)
+             ".pptx",                          # PowerPoint (modern via python-pptx)
+             # ".ppt"  — legacy PowerPoint not directly supported; falls
+             #           through to synthetic-context indexing in the indexer
              ".txt", ".md", ".csv", ".rtf"}
 OCR_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp", ".heic"}
 

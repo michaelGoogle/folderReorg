@@ -250,6 +250,7 @@ def _extract_docx(path: Path) -> ExtractResult:
 
 
 def _extract_xlsx(path: Path) -> ExtractResult:
+    """Modern Excel (.xlsx, .xlsm) via openpyxl."""
     try:
         from openpyxl import load_workbook
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -260,7 +261,83 @@ def _extract_xlsx(path: Path) -> ExtractResult:
                 cells = ["" if v is None else str(v) for v in row]
                 if any(c for c in cells):
                     parts.append("\t".join(cells))
-        return ExtractResult("\n".join(parts), "ok")
+        return ExtractResult("\n".join(parts), "ok" if parts else "empty")
+    except Exception:
+        return ExtractResult("", "corrupt")
+
+
+def _extract_xls(path: Path) -> ExtractResult:
+    """Legacy Excel (.xls) via xlrd. Note: xlrd >= 2.0 dropped .xlsx
+    support, so this codepath is .xls-only — .xlsx still routes to
+    _extract_xlsx via the dispatcher."""
+    try:
+        import xlrd
+        wb = xlrd.open_workbook(str(path))
+        parts: list[str] = []
+        for sheet in wb.sheets():
+            parts.append(f"# Sheet: {sheet.name}")
+            for row_idx in range(sheet.nrows):
+                row = sheet.row_values(row_idx)
+                cells = ["" if v is None or v == "" else str(v) for v in row]
+                if any(c for c in cells):
+                    parts.append("\t".join(cells))
+        return ExtractResult("\n".join(parts), "ok" if parts else "empty")
+    except Exception:
+        return ExtractResult("", "corrupt")
+
+
+def _extract_pptx(path: Path) -> ExtractResult:
+    """Modern PowerPoint (.pptx) via python-pptx. Walks every slide and
+    every text-bearing shape (text frames, tables, notes)."""
+    try:
+        from pptx import Presentation
+        prs = Presentation(str(path))
+        parts: list[str] = []
+        for slide_no, slide in enumerate(prs.slides, 1):
+            slide_parts: list[str] = []
+            for shape in slide.shapes:
+                # Plain text-frame shapes
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        line = "".join(r.text for r in para.runs).strip()
+                        if line:
+                            slide_parts.append(line)
+                # Tables
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        cells = [c.text.strip() for c in row.cells]
+                        if any(cells):
+                            slide_parts.append("\t".join(cells))
+            # Speaker notes
+            if slide.has_notes_slide:
+                notes = slide.notes_slide.notes_text_frame.text.strip()
+                if notes:
+                    slide_parts.append(f"[notes] {notes}")
+            if slide_parts:
+                parts.append(f"# Slide {slide_no}")
+                parts.extend(slide_parts)
+        return ExtractResult("\n".join(parts), "ok" if parts else "empty")
+    except Exception:
+        return ExtractResult("", "corrupt")
+
+
+def _extract_doc_via_antiword(path: Path) -> ExtractResult:
+    """Legacy Word (.doc) via the `antiword` system binary. Returns
+    `unsupported` (not corrupt) if antiword isn't installed, so the
+    indexer's synthetic-context fallback kicks in cleanly."""
+    import shutil as _shutil
+    import subprocess as _sp
+    if not _shutil.which("antiword"):
+        return ExtractResult("", "unsupported")
+    try:
+        r = _sp.run(["antiword", "-w", "0", str(path)],
+                    capture_output=True, timeout=30)
+        if r.returncode != 0:
+            return ExtractResult("", "corrupt")
+        text = r.stdout.decode("utf-8", errors="replace").strip()
+        return ExtractResult(text, "ok" if text else "empty")
+    except _sp.TimeoutExpired:
+        return ExtractResult("", "corrupt")
     except Exception:
         return ExtractResult("", "corrupt")
 
@@ -294,7 +371,15 @@ def _ocr_image(path: Path) -> ExtractResult:
 
 
 def extract(path: Path) -> ExtractResult:
-    """Extract full text from `path`. Never raises; returns status on failure."""
+    """Extract full text from `path`. Never raises; returns status on failure.
+
+    Files whose extension we don't have an extractor for (or where the
+    extractor can't yield text — e.g. .ppt without LibreOffice, encrypted
+    PDFs, image-only PDFs OCR'd to nothing) return status != "ok". The
+    indexer then falls back to indexing a synthetic context document built
+    from the filename + folder hierarchy, so the file is still findable
+    via filename / folder semantics in chat search.
+    """
     if not path.exists() or not path.is_file():
         return ExtractResult("", "corrupt")
     try:
@@ -304,14 +389,30 @@ def extract(path: Path) -> ExtractResult:
     if size > MAX_FILE_SIZE_BYTES:
         return ExtractResult("", "too_large")
     ext = path.suffix.lower()
+    # PDFs (with PyMuPDF + Tesseract OCR fallback for image-only)
     if ext == ".pdf":
         return _extract_pdf(path)
-    if ext in (".docx",):
+    # Word
+    if ext == ".docx":
         return _extract_docx(path)
+    if ext == ".doc":
+        # Requires the `antiword` system binary; falls through to
+        # "unsupported" (→ synthetic context) if not installed.
+        return _extract_doc_via_antiword(path)
+    # Excel
     if ext in (".xlsx", ".xlsm"):
         return _extract_xlsx(path)
+    if ext == ".xls":
+        return _extract_xls(path)
+    # PowerPoint
+    if ext == ".pptx":
+        return _extract_pptx(path)
+    # .ppt has no clean lightweight extractor — needs LibreOffice
+    # conversion. Returns "unsupported" so synthetic context kicks in.
+    # Plain text variants
     if ext in (".txt", ".md", ".csv", ".rtf"):
         return _extract_plain(path)
+    # Standalone images via OCR
     if ext in OCR_IMAGE_EXTS:
         return _ocr_image(path)
     return ExtractResult("", "unsupported")

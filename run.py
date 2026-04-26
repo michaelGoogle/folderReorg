@@ -815,6 +815,32 @@ def stage_rsync_in(ctx: Context) -> bool:
           f"(free here: {du.free // (1<<30):,} GiB)")
     return True
 
+# Sentinel file inside data/ that records WHICH subset currently owns the
+# working data (CSVs, embeddings, extracted text). Used by the startup
+# stale-state detector below to invalidate per-subset state when another
+# subset has overwritten data/ since this one's last save.
+DATA_OWNER_FILE = ROOT / "data" / ".current_subset"
+
+# Stages whose marked-complete status depends on data/<*.csv/*.npy/*>.
+# These all consume or produce files in the shared data/ directory, so
+# they must be re-run whenever data/ is wiped or reassigned to a different
+# subset. (Stages 0, 1 don't touch data/; stage 10 rsyncs target_local;
+# stage 11 reads Qdrant.)
+DATA_DEPENDENT_STAGES = {2, 3, 4, 5, 6, 7, 8, 9}
+
+
+def _write_data_owner(slug: str) -> None:
+    DATA_OWNER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DATA_OWNER_FILE.write_text(slug + "\n")
+
+
+def _read_data_owner() -> str | None:
+    try:
+        return DATA_OWNER_FILE.read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
+
+
 def stage_reset(ctx: Context) -> bool:
     targets = [
         ROOT / "data" / "extracted_text",
@@ -824,6 +850,8 @@ def stage_reset(ctx: Context) -> bool:
     n = sum(1 for _ in targets if _.exists()) + len(csvs) + len(npys)
     if n == 0:
         print(f"{OK} data dir already clean")
+        # Still record ownership so subsequent invalidation logic works
+        _write_data_owner(ctx.subset)
         return True
     print(f"Will delete {len(csvs)} CSVs, {len(npys)} .npy files, and extracted_text/ ({sum(1 for _ in (ROOT/'data'/'extracted_text').rglob('*')) if (ROOT/'data'/'extracted_text').exists() else 0} files)")
     if not confirm("proceed"):
@@ -834,8 +862,42 @@ def stage_reset(ctx: Context) -> bool:
     if (ROOT / "data" / "extracted_text").exists():
         shutil.rmtree(ROOT / "data" / "extracted_text")
     (ROOT / "data" / "extracted_text").mkdir(parents=True)
-    print(f"{OK} reset done")
+    # Mark this subset as the current owner of data/. The next startup will
+    # check this against state.ctx.subset to detect cross-subset interference.
+    _write_data_owner(ctx.subset)
+    print(f"{OK} reset done  (data/ now owned by {ctx.subset})")
     return True
+
+
+def _invalidate_stale_data_stages(state: State) -> None:
+    """
+    Auto-recovery for the shared data/ directory: if another subset has
+    overwritten data/ since this state was last saved, the data-dependent
+    stages must re-run. We detect that by comparing data/.current_subset
+    against state.ctx.subset, and un-mark stages 2..9 from completed when
+    they don't match.
+
+    Idempotent: if no invalidation is needed, this is a no-op.
+    """
+    owner = _read_data_owner()
+    completed_data_stages = state.completed & DATA_DEPENDENT_STAGES
+    if not completed_data_stages:
+        return  # nothing to invalidate
+    if owner == state.ctx.subset:
+        return  # data/ still owned by this subset → state is consistent
+
+    # Mismatch (or never-recorded) → invalidate.
+    invalidated = sorted(completed_data_stages)
+    state.completed -= DATA_DEPENDENT_STAGES
+    state.save()
+    if owner is None:
+        reason = "no owner recorded in data/"
+    else:
+        reason = f"data/ now owned by {owner!r}, not {state.ctx.subset!r}"
+    print(f"{WARN} working-data invalidated: {reason}")
+    print(f"  un-marked stages {invalidated} so they re-run with this subset's "
+          f"source files. (Stages 0, 1, 10, 11 left intact.)")
+    print()
 
 def _python(mod: str, *args: str) -> list[str]:
     return [str(ROOT / ".venv" / "bin" / "python"), "-m", mod, *args]
@@ -1314,6 +1376,55 @@ def _discover_all_entries(verbose: bool = True
     return entries, restructured
 
 
+def _resolve_nas_name(slug: str,
+                      collection: Collection | None) -> str | None:
+    """
+    Look up the actual NAS folder name for a given local slug, by asking
+    discover_roots() for every subset and finding the one whose slug
+    matches. Returns None when no match exists (NAS unreachable, slug
+    typo, subset hasn't been created yet, etc.) so the caller can fall
+    back to a heuristic / interactive prompt.
+
+    `collection`, if provided, restricts the search to that collection
+    so a slug existing in BOTH (e.g. "F-Finance" under Personal AND
+    360F) is disambiguated.
+    """
+    try:
+        entries, _ = _discover_all_entries(verbose=False)
+    except Exception:
+        return None
+    for col, nas_name in entries:
+        if collection is not None and col.name != collection.name:
+            continue
+        if derive_subset_slug(col, nas_name) == slug:
+            return nas_name
+    return None
+
+
+def _smart_nas_name_default(slug: str) -> str:
+    """
+    Reverse-derive a plausible NAS folder name from a slug.
+
+    Heuristic: split on the first '-' (the letter-prefix separator) and
+    expand it to ' - '; replace remaining '-' with single spaces (those
+    were word separators inside the original NAS name).
+
+    Examples:
+      "F-Finance"           -> "F - Finance"
+      "G-Gesundheit-Health" -> "G - Gesundheit Health"
+      "X-perm"              -> "X - perm"
+
+    Used only as a fallback when `_resolve_nas_name` returns None
+    (typically because the NAS isn't reachable). Always offered as a
+    `prompt()` default so the user can override at the keyboard.
+    """
+    parts = slug.split("-", 1)
+    if len(parts) != 2:
+        return slug
+    head, rest = parts
+    return f"{head} - {rest.replace('-', ' ')}"
+
+
 def _parse_batch_spec(spec: str,
                       entries: list[tuple[Collection, str]]
                       ) -> list[tuple[Collection, str]]:
@@ -1503,6 +1614,10 @@ def run_batch(spec: str,
         # rsync), re-base it onto the current mode so paths line up.
         if state.ctx.source_from_mount != source_from_mount:
             state.ctx = ctx
+        # If another subset has touched data/ since this state was saved,
+        # un-mark stages 2..9 so they re-run with this subset's working
+        # data instead of crashing on stale CSVs.
+        _invalidate_stale_data_stages(state)
         state.save()
 
         try:
@@ -1678,19 +1793,40 @@ def main() -> int:
             print(f"{FAIL} could not parse {files[0]}")
             return 1
         print(f"{OK} resumed state: {state.file}")
+        _invalidate_stale_data_stages(state)
     elif args.subset:
-        nas_name = args.nas_name or prompt(
-            "NAS folder name (exact)",
-            default=args.subset.replace("-", " - ", 1),
-        )
+        # Resolve --collection up front so we can use it to look up nas_name.
+        col_hint: Collection | None = None
         if args.collection:
-            col = find_collection_by_name(args.collection)
-            if col is None:
+            col_hint = find_collection_by_name(args.collection)
+            if col_hint is None:
                 print(f"{FAIL} unknown --collection {args.collection!r}. "
                       f"Valid: {', '.join(c.name for c in COLLECTIONS)}")
                 return 1
+        # nas_name resolution priority:
+        #   1. Explicit --nas-name (always wins)
+        #   2. Live NAS lookup: ask discover_roots() for the actual folder
+        #      whose slug == args.subset (under col_hint if given). Reliable
+        #      even when slug -> nas_name reverse derivation is ambiguous
+        #      (e.g. "G-Gesundheit-Health" -> "G - Gesundheit Health"
+        #      with a SPACE between the words, not a hyphen).
+        #   3. Heuristic derivation: split on first '-' for the prefix,
+        #      replace remaining '-' with spaces. Prompt with this default.
+        if args.nas_name:
+            nas_name = args.nas_name
         else:
-            col = find_collection_for(nas_name)
+            looked_up = _resolve_nas_name(args.subset, col_hint)
+            if looked_up:
+                nas_name = looked_up
+                print(f"{DIM}[nas-name auto-resolved from NAS: "
+                      f"{nas_name!r}]{RESET}")
+            else:
+                nas_name = prompt(
+                    "NAS folder name (exact)",
+                    default=_smart_nas_name_default(args.subset),
+                )
+        col = col_hint or find_collection_for(nas_name)
+        if not args.collection:
             print(f"{DIM}[collection auto-detected from name: {col.name}]{RESET}")
         ctx = Context(
             collection=col,
@@ -1702,7 +1838,37 @@ def main() -> int:
         # DIFFERENT collection (e.g. legacy Personal F-Finance) is not
         # mistakenly loaded as if it belonged to this run.
         existing = State.load(ctx.subset, collection=col)
-        state = existing or State(ctx=ctx)
+        if existing is None:
+            state = State(ctx=ctx)
+        else:
+            # The completed list is what we care about preserving from
+            # disk. The CTX (nas_name, source_from_mount, collection)
+            # comes from the current invocation's CLI args + live NAS
+            # lookup — a stale state file might have an outdated value
+            # (e.g. nas_name='G - Gesundheit-Health' saved by a pre-fix
+            # run, vs the correct 'G - Gesundheit Health' resolved now).
+            # Rebase the state's ctx to ours and re-save if anything
+            # changed, so subsequent stages use the right paths.
+            if (existing.ctx.nas_name != ctx.nas_name
+                or existing.ctx.source_from_mount != ctx.source_from_mount
+                or existing.ctx.collection.name != ctx.collection.name):
+                print(f"{WARN} state-file ctx was stale; refreshing it:")
+                if existing.ctx.nas_name != ctx.nas_name:
+                    print(f"  nas_name:           "
+                          f"{existing.ctx.nas_name!r}  →  {ctx.nas_name!r}")
+                if existing.ctx.source_from_mount != ctx.source_from_mount:
+                    print(f"  source_from_mount:  "
+                          f"{existing.ctx.source_from_mount}  →  "
+                          f"{ctx.source_from_mount}")
+                if existing.ctx.collection.name != ctx.collection.name:
+                    print(f"  collection:         "
+                          f"{existing.ctx.collection.name!r}  →  "
+                          f"{ctx.collection.name!r}")
+                existing.ctx = ctx
+                existing.save()
+            state = existing
+        # Auto-recover from cross-subset interference in shared data/.
+        _invalidate_stale_data_stages(state)
     else:
         ctx = pick_subset_interactive()
         # Honour the CLI flag even if the subset was picked interactively.
@@ -1715,6 +1881,7 @@ def main() -> int:
         else:
             state = State(ctx=ctx)
             state.save()
+        _invalidate_stale_data_stages(state)
 
     cur = next_pending(state)
     while cur is not None:
@@ -1736,7 +1903,20 @@ def main() -> int:
                 print(f"\n{OK} stage {cur} complete")
                 cur = next_pending(state, cur + 1)
             else:
-                print(f"\n{FAIL} stage {cur} did not finish cleanly — fix & retry, or skip/quit")
+                # In --auto-run mode, the menu would auto-default back to
+                # 'r' on the next iteration → infinite retry loop on a
+                # deterministic failure. Bail with a clear exit code so
+                # the operator can fix the underlying issue and re-run.
+                if AUTO_RUN:
+                    print(f"\n{FAIL} stage {cur} failed under --auto-run; "
+                          f"aborting to avoid an infinite retry loop.")
+                    print(f"  state saved at: {state.file}")
+                    print(f"  fix the issue, then resume with: "
+                          f"./run.py --resume  "
+                          f"(or re-invoke with --subset / --collection)")
+                    return 1
+                print(f"\n{FAIL} stage {cur} did not finish cleanly — "
+                      f"fix & retry, or skip/quit")
         elif action == "s":
             if confirm(f"Mark stage {cur} complete WITHOUT running it", default=False):
                 state.completed.add(cur)

@@ -36,6 +36,15 @@ class Source:
     chunk_id: int
     n_chunks: int
     root: str = ""       # logical root name (e.g. "F-Finance-restructured")
+    # NEW (added with synthetic-context indexing):
+    # text_source = "extracted" → chunk text is real document content
+    # text_source = "synthetic" → chunk text was built from filename +
+    #                              folder + parsed convention because the
+    #                              file had no extractable text
+    # extraction_status = "ok" / "password" / "corrupt" / "too_large" /
+    #                     "unsupported" / "empty" / "no_chunks" / "unreadable"
+    text_source: str = "extracted"
+    extraction_status: str = "ok"
 
 
 @dataclass
@@ -95,6 +104,10 @@ def search(query: str,
             chunk_id=int((h.payload or {}).get("chunk_id", 0)),
             n_chunks=int((h.payload or {}).get("n_chunks", 1)),
             root=(h.payload or {}).get("root", ""),
+            # Default to "extracted" / "ok" so chunks indexed before this
+            # field existed render unchanged in the chat UI.
+            text_source=(h.payload or {}).get("text_source", "extracted"),
+            extraction_status=(h.payload or {}).get("extraction_status", "ok"),
         )
         for h in hits
     ]
