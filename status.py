@@ -263,6 +263,12 @@ def section_currently_running(reap: bool = True) -> None:
     # "6.0 GB" — two whitespace-separated tokens — so naive cell-by-cell
     # split-and-suffix-match returns just "GB". Use a regex that matches
     # the full "<number> <unit>" pair (with or without the space).
+    # We also flag UNEXPECTED models — anything that isn't qwen2.5:14b
+    # (Phase 3 / chat) or bge-m3 (embeddings) is external noise on the
+    # GPU, sometimes from manual `ollama run` testing or IDE plugins
+    # pointed at this Ollama instance. Setting these makes it obvious at
+    # a glance.
+    EXPECTED_MODEL_PREFIXES = ("qwen2.5:14b", "bge-m3")
     rc, out, _ = run(["ollama", "ps"])
     if rc == 0 and out.strip():
         lines = [l for l in out.splitlines() if l.strip()]
@@ -273,7 +279,13 @@ def section_currently_running(reap: bool = True) -> None:
                 model = cells[0] if cells else "?"
                 m = size_re.search(l)
                 size = f"{m.group(1)} {m.group(2)}" if m else "?"
-                print(f"  {ARROW} GPU:     {model} resident ({size})")
+                expected = any(model.startswith(p) for p in EXPECTED_MODEL_PREFIXES)
+                if expected:
+                    print(f"  {ARROW} GPU:     {model} resident ({size})")
+                else:
+                    print(f"  {WARN} GPU:     {model} resident ({size})  "
+                          f"{DIM}— NOT a folder-reorg model (qwen2.5:14b / "
+                          f"bge-m3 expected). External client?{RESET}")
         else:
             print(f"  {DOT} GPU:     idle")
     else:
