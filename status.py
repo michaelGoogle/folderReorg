@@ -259,15 +259,20 @@ def section_currently_running(reap: bool = True) -> None:
     elif active_subset_hint:
         print(f"  {ARROW} Subset:  {DIM}{active_subset_hint}{RESET}")
 
-    # 4. GPU residency (one-line summary)
+    # 4. GPU residency (one-line summary). `ollama ps` formats sizes as
+    # "6.0 GB" — two whitespace-separated tokens — so naive cell-by-cell
+    # split-and-suffix-match returns just "GB". Use a regex that matches
+    # the full "<number> <unit>" pair (with or without the space).
     rc, out, _ = run(["ollama", "ps"])
     if rc == 0 and out.strip():
         lines = [l for l in out.splitlines() if l.strip()]
         if len(lines) > 1:  # has data rows
+            size_re = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGT]B)\b")
             for l in lines[1:]:
                 cells = l.split()
                 model = cells[0] if cells else "?"
-                size = next((c for c in cells if c.endswith("GB") or c.endswith("MB")), "?")
+                m = size_re.search(l)
+                size = f"{m.group(1)} {m.group(2)}" if m else "?"
                 print(f"  {ARROW} GPU:     {model} resident ({size})")
         else:
             print(f"  {DOT} GPU:     idle")

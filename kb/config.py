@@ -93,10 +93,15 @@ def discover_roots() -> list[tuple[str, Path]]:
     treat that as "nothing to index right now" rather than an error.
     """
     base: Path = _VARIANT["base"]
-    if not base.exists() or not base.is_dir():
-        return []
     out: list[tuple[str, Path]] = []
+    # Wrap the whole probe in OSError handling: a stale SSHFS mount makes
+    # base.exists() raise ENOTCONN (errno 107) before any of our existing
+    # iteration-time guards run. Returning [] here lets long-lived processes
+    # (Streamlit, run.py at import time) continue running with "no roots
+    # discovered" instead of crashing on import.
     try:
+        if not base.exists() or not base.is_dir():
+            return []
         for p in sorted(base.iterdir()):
             if not p.is_dir():
                 continue
@@ -104,7 +109,8 @@ def discover_roots() -> list[tuple[str, Path]]:
                 continue
             out.append((p.name, p))
     except OSError:
-        # NAS unreachable, mount stale, etc. Caller treats as empty.
+        # NAS unreachable, mount stale (ENOTCONN), permission denied, etc.
+        # Treat as "nothing to index right now" rather than an error.
         return []
     return out
 

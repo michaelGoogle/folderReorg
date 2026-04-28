@@ -15,18 +15,51 @@ import json
 import sys
 from datetime import datetime
 
-from kb.config import DATA_DIR, KB_VARIANT, discover_roots
+from kb.config import DATA_DIR, KB_VARIANT, NAS_MOUNT, discover_roots
 from kb.indexer import delta_scan
+
+
+def _mount_alive() -> tuple[bool, str]:
+    """
+    Probe the NAS mount with a short stat() call on a known child path
+    that forces an SSH round-trip. Returns (alive, error_message).
+
+    A stale SSHFS mount leaves the entry in /proc/mounts (so findmnt and
+    even stat() on the mount root succeed) — but any I/O that requires an
+    SSH round-trip raises OSError(ENOTCONN, errno 107). We probe a child
+    path so that case surfaces immediately.
+    """
+    probe = NAS_MOUNT / "Data_Michael_restructured"
+    try:
+        probe.exists()
+        return True, ""
+    except OSError as e:
+        return False, f"{type(e).__name__}: {e}"
 
 
 def main() -> int:
     print(f"[{datetime.now().isoformat(timespec='seconds')}] "
           f"KB scheduled scan starting (variant: {KB_VARIANT})")
+    # Refuse to proceed when the SSHFS mount is stale. Without this guard,
+    # delta_scan() returns {"error": "root not found"} for every root, and
+    # those minimal dicts get written to last_scan_<root>.json — silently
+    # CLOBBERING the real summaries from earlier scans. A loud failure
+    # here is much better than a quiet data-loss-of-history scenario.
+    alive, err = _mount_alive()
+    if not alive:
+        print(f"  ✗ NAS mount probe failed: {err}")
+        print(f"  Refusing to run: would write empty last_scan_*.json files "
+              f"and clobber valid prior summaries.")
+        print(f"  Fix:")
+        print(f"    fusermount3 -uz {NAS_MOUNT}")
+        print(f"    <project-root>/kb.py mount")
+        print(f"    <project-root>/kb.py --variant {KB_VARIANT} reindex")
+        return 1
     # Re-discover at run time so any newly-restructured subsets get picked up
     # without a config edit / process restart.
     roots = discover_roots()
     if not roots:
-        print("  (nothing to index — base folder empty or mount not up)")
+        print("  (nothing to index — base folder empty)")
         return 0
     any_error = False
     for name, path in roots:

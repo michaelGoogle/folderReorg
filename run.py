@@ -775,6 +775,26 @@ def stage_preflight(ctx: Context) -> bool:
         print(f"     Create the shared folder 'Data_Michael_restructured' via "
               f"DSM → Control Panel → Shared Folder (one-time).")
         # Not a hard blocker until Phase 7
+
+    # SSHFS mount liveness check (only relevant when --source-from-mount).
+    # A stale mount makes os.stat() return ENOTCONN; later stages would
+    # crash with cryptic tracebacks. Catch it here with a clear fix hint.
+    if ctx.source_from_mount:
+        from kb.config import NAS_MOUNT
+        # Probe a CHILD path (not the mount root): stat'ing the mount root
+        # often succeeds even on a stale mount because the FUSE handle is
+        # still alive — it's only when we ask for a child that the SSH
+        # round-trip happens and ENOTCONN surfaces.
+        probe = NAS_MOUNT / "Data_Michael_restructured"
+        try:
+            _ = probe.exists()
+            print(f"  {OK} SSHFS mount alive ({NAS_MOUNT})")
+        except OSError as e:
+            print(f"  {FAIL} SSHFS mount appears stale: {e}")
+            print(f"     Fix:")
+            print(f"       fusermount3 -uz {NAS_MOUNT}")
+            print(f"       ./kb.py mount")
+            ok = False
     return ok
 
 def stage_rsync_in(ctx: Context) -> bool:
