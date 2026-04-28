@@ -9,6 +9,9 @@ Companion docs:
 - [`pipeline-overview.md`](./pipeline-overview.md) — architecture (what each
   phase does and why)
 - [`knowledge-base.md`](./knowledge-base.md) — RAG / chat UI specifics
+- [`unattended-runs.md`](./unattended-runs.md) — running long batches in the
+  background so they survive SSH disconnects (tmux / nohup / systemd-run)
+- [`setup.md`](./setup.md) — first-time host setup from a fresh Ubuntu install
 
 ---
 
@@ -179,6 +182,12 @@ For overnight or long-running campaigns. Implies `--auto-run` automatically.
 up where the prior run left off via the per-subset state file (completed
 stages auto-skip, only changed or never-run stages execute again). Pass
 `--skip-restructured` to leave already-restructured subsets alone.
+
+> **⚠ Run batches detached from SSH.** A bare `./run.py --batch …` over
+> SSH dies on disconnect (laptop sleep, Wi-Fi switch, idle timeout).
+> Before kicking off any batch, see [`unattended-runs.md`](./unattended-runs.md).
+> The short form: wrap in `tmux new -s reorg` first, then `Ctrl-B  D`
+> to detach.
 
 ### `SPEC` syntax
 
