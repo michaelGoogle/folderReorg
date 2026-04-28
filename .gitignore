@@ -47,6 +47,8 @@ nas/
 # --- Secrets ---
 .env
 .env.*
+# Template/example file is safe to commit:
+!.env.example
 *.pem
 *.key
 secrets/

@@ -1,0 +1,45 @@
+# Keep `docker build` context small + fast. None of these belong in the image.
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Git / CI
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# Runtime data on aizh — NEVER copy into the image (some are 60 GB+)
+source_local/
+target_local/
+data/
+logs/
+qdrant_data/
+qdrant_data_personal/
+qdrant_data_360f/
+kb/data/
+nas/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Docs aren't needed at runtime
+docs/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/

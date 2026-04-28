@@ -1,0 +1,177 @@
+# folder-reorg — full container stack
+#
+# Replaces docker/qdrant/docker-compose.yml. Brings up:
+#   · qdrant-personal  (bridge, 127.0.0.1:6333)
+#   · qdrant-360f      (bridge, 127.0.0.1:6433)
+#   · chat-personal    (host network, Streamlit on :8502)
+#   · chat-360f        (host network, Streamlit on :8503)
+#   · cloudflared      (host network, public Cloudflare Tunnel)
+#   · pipeline         (oneshot — `docker compose run` only; not auto-started)
+#
+# Ollama is INTENTIONALLY NOT IN THIS FILE. It runs on the host as a
+# system service and is shared with other applications on this machine.
+# The chat + pipeline services run with `network_mode: host` so they
+# reach Ollama at http://127.0.0.1:11434 — exactly the same URL the host
+# uses today, no Ollama configuration changes needed.
+#
+# First-time bring-up:
+#   cp .env.example .env       # edit values for your host
+#   docker compose build       # build the folderreorg image
+#   docker compose up -d       # start qdrant + chat + cloudflared
+#
+# Day-to-day pipeline:
+#   docker compose run -it --rm pipeline ./run.py                          # interactive
+#   docker compose run -d --name reorg-batch pipeline \                    # detached batch
+#       ./run.py --batch all --source-from-mount
+#   docker compose logs -f reorg-batch                                     # tail it
+#
+# See docs/docker.md for the full operations guide.
+
+x-app-image: &app-image
+  image: folderreorg:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      APP_UID: "${APP_UID:-1000}"
+      APP_GID: "${APP_GID:-1000}"
+
+services:
+  # ---------------------------------------------------------------------
+  # Qdrant — vector store, one container per variant.
+  # Bridge network with published 127.0.0.1 ports (preserves the existing
+  # network topology so `kb.py` / `status.py` on the host still works
+  # against http://127.0.0.1:6333 / :6433 unchanged).
+  # ---------------------------------------------------------------------
+  qdrant-personal:
+    image: qdrant/qdrant:latest
+    container_name: folderreorg-qdrant-personal
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - ${QDRANT_DATA_PERSONAL:-./qdrant_data_personal}:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+
+  qdrant-360f:
+    image: qdrant/qdrant:latest
+    container_name: folderreorg-qdrant-360f
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6433:6333"
+      - "127.0.0.1:6434:6334"
+    volumes:
+      - ${QDRANT_DATA_360F:-./qdrant_data_360f}:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+
+  # ---------------------------------------------------------------------
+  # Streamlit chat UIs — one per variant.
+  # Run on host network so they can reach:
+  #   · Ollama on the host at 127.0.0.1:11434
+  #   · Qdrant containers at their published 127.0.0.1:6333 / :6433
+  #   · cloudflared on the same host network
+  # ---------------------------------------------------------------------
+  chat-personal:
+    <<: *app-image
+    container_name: folderreorg-chat-personal
+    restart: unless-stopped
+    network_mode: host
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    environment:
+      KB_VARIANT: personal
+      KB_NAS_MOUNT: /app/nas
+      QDRANT_URL: http://127.0.0.1:6333
+      OLLAMA_URL: http://127.0.0.1:11434
+    volumes:
+      # Read-only NAS mount (the SSHFS mount lives on the HOST; we
+      # bind it in here as :ro so the chat preview can serve files).
+      - ${NAS_MOUNT_HOST:-${HOME}/nas}:/app/nas:ro
+      # Cached HuggingFace models so bge-m3 doesn't re-download per
+      # container rebuild. ~1.2 GB.
+      - ${HF_CACHE_HOST:-${HOME}/.cache/huggingface}:/app/.cache/huggingface
+    command: >
+      streamlit run chat_ui/chat_ui.py
+        --server.address 127.0.0.1
+        --server.port 8502
+        --server.headless true
+        --browser.gatherUsageStats false
+    depends_on:
+      - qdrant-personal
+
+  chat-360f:
+    <<: *app-image
+    container_name: folderreorg-chat-360f
+    restart: unless-stopped
+    network_mode: host
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    environment:
+      KB_VARIANT: 360f
+      KB_NAS_MOUNT: /app/nas
+      QDRANT_URL: http://127.0.0.1:6433
+      OLLAMA_URL: http://127.0.0.1:11434
+    volumes:
+      - ${NAS_MOUNT_HOST:-${HOME}/nas}:/app/nas:ro
+      - ${HF_CACHE_HOST:-${HOME}/.cache/huggingface}:/app/.cache/huggingface
+    command: >
+      streamlit run chat_ui/chat_ui.py
+        --server.address 127.0.0.1
+        --server.port 8503
+        --server.headless true
+        --browser.gatherUsageStats false
+    depends_on:
+      - qdrant-360f
+
+  # ---------------------------------------------------------------------
+  # Cloudflare Tunnel — exposes the chat UIs publicly with email-PIN
+  # auth via Cloudflare Access. Reads the credentials + ingress config
+  # from $HOME/.cloudflared/ (set up once via `cloudflared tunnel login`
+  # on the host — see docs/setup.md §8).
+  # ---------------------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: folderreorg-cloudflared
+    restart: unless-stopped
+    network_mode: host
+    command: tunnel --no-autoupdate run ${CLOUDFLARED_TUNNEL:-folderreorg}
+    volumes:
+      - ${CLOUDFLARED_CONFIG_HOST:-${HOME}/.cloudflared}:/etc/cloudflared:ro
+
+  # ---------------------------------------------------------------------
+  # Pipeline / KB CLI — one-shot invocations.
+  # Profile "oneshot" keeps it OUT of `docker compose up`. Use:
+  #   docker compose run -it --rm pipeline ./run.py
+  #   docker compose run --rm pipeline .venv/bin/python kb.py --variant 360f status
+  #
+  # network_mode: host so it reaches:
+  #   · Ollama on host at :11434
+  #   · Qdrant containers' published :6333 / :6433
+  # ---------------------------------------------------------------------
+  pipeline:
+    <<: *app-image
+    profiles: [oneshot]
+    network_mode: host
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    environment:
+      # Default to "personal"; override per invocation:
+      #   docker compose run -e KB_VARIANT=360f --rm pipeline kb.py status
+      KB_VARIANT: personal
+      KB_NAS_MOUNT: /app/nas
+      QDRANT_URL: http://127.0.0.1:6333
+      OLLAMA_URL: http://127.0.0.1:11434
+    volumes:
+      - ${NAS_MOUNT_HOST:-${HOME}/nas}:/app/nas:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./target_local:/app/target_local
+      - ./source_local:/app/source_local
+      - ${HF_CACHE_HOST:-${HOME}/.cache/huggingface}:/app/.cache/huggingface
+
+# Note: no top-level "volumes:" block. We use bind mounts (./qdrant_data_*,
+# ./data, ./logs, etc.) instead of named volumes so the data is visible /
+# inspectable from the host and so it migrates with `git clone + cp -a`
+# instead of `docker volume`-specific backup tooling.
