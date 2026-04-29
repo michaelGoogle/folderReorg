@@ -45,8 +45,7 @@ WORKDIR /app
 # Install Python dependencies first for layer caching: only re-runs when
 # pyproject.toml changes, not on every source edit.
 COPY pyproject.toml ./
-RUN uv pip install --system --no-cache -e . \
- && uv pip install --system --no-cache pytesseract pillow
+RUN uv pip install --system --no-cache -e .
 
 # Source code last so edits don't bust the dep layer
 COPY src       ./src

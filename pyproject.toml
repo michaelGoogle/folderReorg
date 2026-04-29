@@ -24,7 +24,12 @@ dependencies = [
     "torch>=2.2",               # CUDA build picked up from system/uv
     # Language detection
     "lingua-language-detector>=2.0",  # pure-Python, numpy-2 compatible (fasttext-wheel is broken on np 2.x)
-    # Review UI
+    # KB / RAG
+    "qdrant-client>=1.10",      # Qdrant Python client (chunk upsert + retrieval)
+    # OCR (also needs the host packages: tesseract-ocr, tesseract-ocr-deu/eng)
+    "pytesseract>=0.3.10",
+    "pillow>=10.0",
+    # Review UI + chat UI
     "streamlit>=1.35",
 ]
 
