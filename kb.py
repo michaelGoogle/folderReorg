@@ -140,6 +140,68 @@ def cmd_chat(args) -> int:
     return subprocess.call(argv, cwd=str(root), env=env)
 
 
+def cmd_cache_flush(args) -> int:
+    """
+    Flush (or inspect) the per-variant extraction-cache.
+
+    The extraction-cache records sha256 → status entries for files where
+    text extraction reliably fails (password-protected PDFs, corrupt files,
+    unsupported types, etc.). On every reindex, files whose sha256 hits
+    the cache skip the slow extract() call and go straight to synthetic-
+    context indexing.
+
+    You'll want to flush after:
+      · Installing a new extractor (e.g. `apt install antiword` enables
+        .doc — entries previously cached as "unsupported" should retry)
+      · Upgrading PyMuPDF / openpyxl / etc. (corrupt-file repair improved)
+      · Suspecting cache poisoning from a transient failure
+    """
+    from kb.config import DATA_DIR, KB_VARIANT
+    from kb import extraction_cache as _excache
+
+    cache = _excache.load(DATA_DIR)
+    s = _excache.stats(cache)
+    n = s.get("total", 0)
+    by_status = s.get("by_status", {})
+
+    if args.show or n == 0:
+        print(f"Extraction cache for variant '{KB_VARIANT}' "
+              f"({DATA_DIR / _excache.CACHE_FILENAME}):")
+        if n == 0:
+            print(f"  (empty)")
+            return 0
+        print(f"  total entries: {n:,}")
+        for status, cnt in sorted(by_status.items(), key=lambda kv: -kv[1]):
+            print(f"    {cnt:>6}  {status}")
+        if not args.show:
+            print()
+            print(f"Pass --show to inspect; -y to flush.")
+        return 0
+
+    if not args.yes:
+        print(f"Will DELETE the extraction-cache for variant '{KB_VARIANT}':")
+        for status, cnt in sorted(by_status.items(), key=lambda kv: -kv[1]):
+            print(f"    {cnt:>6}  {status}")
+        print()
+        try:
+            ans = input("Proceed? [y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+
+    p = DATA_DIR / _excache.CACHE_FILENAME
+    if p.exists():
+        p.unlink()
+        print(f"✓ deleted {p}")
+    else:
+        print(f"  (cache file did not exist)")
+    print(f"  Next reindex will re-attempt extraction for "
+          f"all {n:,} previously-cached files.")
+    return 0
+
+
 def cmd_remove(args) -> int:
     """
     Delete every chunk for one root from the active variant's collection,
@@ -267,6 +329,14 @@ def parse_args():
                          "(default: also delete it). Useful if you want a "
                          "post-mortem record of what was indexed before removal.")
 
+    cf = sub.add_parser("cache-flush",
+                        help="show or wipe the extraction-cache for the chosen "
+                             "--variant (skips re-extracting known-bad files)")
+    cf.add_argument("--show", action="store_true",
+                    help="print the cache contents (counts by status); don't delete")
+    cf.add_argument("--yes", "-y", action="store_true",
+                    help="skip the confirmation prompt before deleting")
+
     return ap.parse_args()
 
 
@@ -279,15 +349,16 @@ def main() -> int:
         print("Specify a subcommand. Try ./kb.py --help", file=sys.stderr)
         return 2
     dispatch = {
-        "setup":   cmd_setup,
-        "mount":   cmd_mount,
-        "umount":  cmd_umount,
-        "index":   cmd_index,
-        "reindex": cmd_reindex,
-        "query":   cmd_query,
-        "chat":    cmd_chat,
-        "status":  cmd_status,
-        "remove":  cmd_remove,
+        "setup":       cmd_setup,
+        "mount":       cmd_mount,
+        "umount":      cmd_umount,
+        "index":       cmd_index,
+        "reindex":     cmd_reindex,
+        "query":       cmd_query,
+        "chat":        cmd_chat,
+        "status":      cmd_status,
+        "remove":      cmd_remove,
+        "cache-flush": cmd_cache_flush,
     }
     return dispatch[args.cmd](args)
 

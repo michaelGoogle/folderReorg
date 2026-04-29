@@ -309,6 +309,78 @@ starting with `.`, `@`, or `#`.
 
 ---
 
+## Extraction cache — never re-attempt the same failed extraction
+
+A persistent sha256-keyed cache at
+`kb/data/<variant>/extraction_cache.json` records files where text
+extraction reliably fails (password-protected PDFs, corrupt files,
+unsupported types, files that produced no extractable text). On every
+reindex, files whose sha256 hits the cache **skip the slow `extract()`
+call entirely** and go straight to synthetic-context indexing —
+identical end result (file is searchable by filename + folder), but
+zero wasted CPU and no MuPDF noise on every scan.
+
+Why this exists alongside the Qdrant-side fast paths:
+
+| Scenario | Qdrant fast path | Extraction cache |
+|---|---|---|
+| Same file at same path, unchanged | ✓ stat fast path | (not needed) |
+| Same file at same path, mtime touched | ✓ sha fast path | (not needed) |
+| **Qdrant wiped (`docker compose down -v`, `kb.py remove`)** | ✗ all files look "new" | ✓ password / corrupt files skip extract |
+| **File renamed / moved / copied** | ✗ different rel_path → no match | ✓ sha matches → skip extract |
+
+What gets cached (`PERSISTENT_FAILURE_STATUSES`):
+`password`, `corrupt`, `unsupported`, `too_large`, `empty`, `no_chunks`.
+
+What does NOT get cached:
+- `ok` (successful extractions are already in Qdrant — no point storing twice)
+- `unreadable` (could be transient — permission flip, NAS hiccup — always retry)
+
+### Inspect / flush the cache
+
+```bash
+# Show cache contents (counts by status)
+.venv/bin/python kb.py --variant personal cache-flush --show
+
+# Wipe (with confirmation prompt)
+.venv/bin/python kb.py --variant personal cache-flush
+.venv/bin/python kb.py --variant personal cache-flush -y    # no prompt
+```
+
+When to flush:
+- After installing a new extractor (e.g. `apt install antiword` — entries
+  cached as "unsupported" should retry as ".doc" now works)
+- After a major dependency upgrade (PyMuPDF, openpyxl) that may improve
+  corrupt-file recovery
+- If you suspect the cache poisoned a transient failure as permanent
+
+### Per-scan visibility
+
+Each `kb.scheduled` per-root summary now includes:
+
+```
+  → new=24 updated=0 unchanged=753 deleted=0 skip=0 chunks_added=58 errors=0
+  → extraction-cache: 1,847 entries total (+12 new this scan)
+```
+
+`+N new this scan` is files newly recorded as known-failures (will be
+skipped on the next scan). `total` is the cumulative number of cached
+shas — bounded at 100,000 to prevent runaway growth on weird datasets.
+
+### Safety properties
+
+- **Schema-versioned**: bump `SCHEMA_VERSION` in `kb/extraction_cache.py`
+  when extraction logic changes invalidate cached entries; old cache is
+  silently dropped.
+- **Atomic writes**: `tempfile + os.replace` so Ctrl-C mid-write doesn't
+  corrupt the file.
+- **Survives Qdrant wipes** (lives on the host filesystem, not in
+  Qdrant) but lives under `kb/data/` so it's easy to delete.
+- **Cap-bounded**: stops adding new entries past 100K (no eviction —
+  cache misses just fall through to a real `extract()` call).
+
+---
+
 ## Removing a subset from the KB
 
 The `kb.py remove` subcommand deletes every chunk for one root from the

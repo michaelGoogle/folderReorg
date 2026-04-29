@@ -294,19 +294,28 @@ def _synthetic_context_doc(rel_path: Path, abs_path: Path, status: str,
 
 
 def index_file(client, root_name: str, root_path: Path, rel_path: Path,
-               existing: dict | None = None) -> tuple[str, int]:
+               existing: dict | None = None,
+               extraction_cache: dict | None = None) -> tuple[str, int]:
     """
     Index one file. Returns (status, n_chunks).
-    status: "new", "updated", "unchanged", "skip:<reason>"
+    status: "new", "updated", "unchanged", "cache-skip", "skip:<reason>"
 
     `existing` is the previously-indexed metadata for this (root, rel_path)
     from Qdrant, or None for a first-time index. Shape:
         {"sha256": "...", "mtime": "ISO", "size_bytes": int}
 
+    `extraction_cache` is the per-variant skip-cache loaded by delta_scan
+    (see kb/extraction_cache.py). Files whose sha256 is recorded as a
+    persistent extraction failure (password / corrupt / unsupported / …)
+    skip the slow `extract()` path entirely and go straight to synthetic
+    context. None disables the cache (useful in tests / one-off calls).
+
     Fast-path decision ladder (cheap → expensive):
       1. stat the file (both mtime + size unchanged → unchanged, no hash)
       2. sha256 the file (matches stored → touched only, payload updated)
-      3. extract + chunk + embed + upsert (content changed / new)
+      3. EXTRACTION CACHE: sha matches a known-failure → synthetic context
+         only, no extract() call (avoids re-doing work that always fails)
+      4. extract + chunk + embed + upsert (content changed / new)
     """
     abs_path = root_path / rel_path
     try:
@@ -353,26 +362,59 @@ def index_file(client, root_name: str, root_path: Path, rel_path: Path,
             pass  # not fatal; worst case we re-hash again next time
         return ("unchanged", 0)
 
-    # ---------- Slow path: content actually changed (or brand-new file) ----
-    res = extract(abs_path)
+    # ---------- Fast path 3: extraction-cache hit (sha known to fail) ------
+    # Skip the expensive extract() entirely for files whose sha256 we've
+    # previously seen fail with a deterministic-failure status (password,
+    # corrupt, unsupported, …). Build synthetic context using the cached
+    # status. Saves CPU + suppresses repeat MuPDF noise on every reindex
+    # of the same unindexable file (e.g. after a Qdrant wipe).
     conv = parse_convention(abs_path.name)
-    # If text extraction succeeded with real content, use it as-is.
-    # Otherwise fall back to a synthetic context document built from the
-    # filename + folder hierarchy + parsed convention metadata. This makes
-    # ZIP archives, image-only PDFs (where OCR yielded nothing), raw
-    # images, videos, and any other unindexable file type discoverable
-    # via filename / folder semantics in chat search.
-    if res.status == "ok" and res.text.strip():
-        text = res.text
-        text_source = "extracted"
+    if extraction_cache is not None:
+        from kb.extraction_cache import is_known_failure, record_failure
+        cache_hit, cached_status = is_known_failure(extraction_cache, sha)
     else:
-        text = _synthetic_context_doc(rel_path, abs_path, res.status, conv,
+        cache_hit, cached_status = False, None
+
+    if cache_hit:
+        # Refresh last_seen / filename without doing extraction work.
+        from kb.extraction_cache import record_failure as _refresh
+        _refresh(extraction_cache, sha, cached_status, abs_path.name)
+        text = _synthetic_context_doc(rel_path, abs_path, cached_status, conv,
                                       current_size)
         text_source = "synthetic"
+        # `res` is synthesised so the rest of the function can use it
+        # uniformly (it's referenced for ocr_used / pages / status payload).
+        from kb.extract import ExtractResult as _ExtractResult
+        res = _ExtractResult("", cached_status)
         if not text.strip():
-            # Truly nothing to embed (no filename, no path) — give up.
             _delete_file_chunks(client, root_name, str(rel_path))
-            return (f"skip:{res.status or 'empty'}", 0)
+            return (f"skip:{cached_status}", 0)
+    else:
+        # ---------- Slow path: actual extract() call ------------------
+        res = extract(abs_path)
+        # If text extraction succeeded with real content, use it as-is.
+        # Otherwise fall back to a synthetic context document built from the
+        # filename + folder hierarchy + parsed convention metadata. This makes
+        # ZIP archives, image-only PDFs (where OCR yielded nothing), raw
+        # images, videos, and any other unindexable file type discoverable
+        # via filename / folder semantics in chat search.
+        if res.status == "ok" and res.text.strip():
+            text = res.text
+            text_source = "extracted"
+        else:
+            # Persistent failure → record in the extraction cache so
+            # the next scan (after Qdrant wipe / file rename) skips
+            # the extract() call.
+            if extraction_cache is not None:
+                record_failure(extraction_cache, sha, res.status,
+                               abs_path.name)
+            text = _synthetic_context_doc(rel_path, abs_path, res.status,
+                                          conv, current_size)
+            text_source = "synthetic"
+            if not text.strip():
+                # Truly nothing to embed (no filename, no path) — give up.
+                _delete_file_chunks(client, root_name, str(rel_path))
+                return (f"skip:{res.status or 'empty'}", 0)
 
     chunks = split_text(text)
     if not chunks:
@@ -450,7 +492,7 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
     existing = _existing_files_for_root(client, root_name)
     seen: set[str] = set()
     counts = {"new": 0, "updated": 0, "unchanged": 0, "deleted": 0,
-              "skip": 0, "chunks_added": 0}
+              "skip": 0, "chunks_added": 0, "cache_skip": 0}
     errors: list[str] = []
     # Per-file skip records: {"path": "<rel>", "reason": "<reason>"} entries.
     # Capped at MAX_SKIPPED_RECORDED to keep the per-root JSON small even on
@@ -461,13 +503,23 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
     # Per-file deletion records (rel paths only — no ambiguity to capture).
     deleted_paths: list[str] = []
 
+    # Load the variant's persistent extraction-cache. Files whose sha256
+    # is recorded as a deterministic-failure (password / corrupt / …)
+    # bypass extract() entirely. Survives Qdrant wipes since it lives at
+    # kb/data/<variant>/extraction_cache.json on the host, not in Qdrant.
+    from kb.config import DATA_DIR as _VARIANT_DATA_DIR
+    from kb import extraction_cache as _excache
+    extraction_cache = _excache.load(_VARIANT_DATA_DIR)
+    cache_hits_pre = _excache.stats(extraction_cache).get("total", 0)
+
     files = [p for p in root_path.rglob("*") if p.is_file()]
     for p in tqdm(files, unit="file", desc=f"index {root_name}"):
         rel = p.relative_to(root_path)
         seen.add(str(rel))
         try:
             status, nc = index_file(client, root_name, root_path, rel,
-                                    existing.get(str(rel)))
+                                    existing.get(str(rel)),
+                                    extraction_cache=extraction_cache)
         except Exception as e:
             errors.append(f"{rel}: {e}")
             continue
@@ -488,6 +540,16 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
         _delete_file_chunks(client, root_name, rp)
         counts["deleted"] += 1
         deleted_paths.append(rp)
+
+    # Persist the cache. New failure entries from this scan are now
+    # available to subsequent scans — even ones following a Qdrant wipe.
+    try:
+        _excache.save(extraction_cache, _VARIANT_DATA_DIR)
+    except Exception as e:
+        errors.append(f"(extraction_cache save failed: {e})")
+    cache_total = _excache.stats(extraction_cache).get("total", 0)
+    counts["extraction_cache_total"] = cache_total
+    counts["extraction_cache_added"] = max(0, cache_total - cache_hits_pre)
 
     counts["errors"] = errors
     counts["skipped"] = skipped                  # NEW: per-file skip records

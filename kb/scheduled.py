@@ -91,6 +91,16 @@ def main() -> int:
                 f"chunks_added={summary.get('chunks_added', 0)} "
                 f"errors={n_errors}"
             )
+            # Surface extraction-cache impact: how many sha entries we have
+            # now (cumulative across scans) and how many this scan added.
+            cache_total = summary.get("extraction_cache_total")
+            cache_added = summary.get("extraction_cache_added")
+            if cache_total is not None:
+                print(
+                    f"  → extraction-cache: {cache_total:,} entries total"
+                    + (f" (+{cache_added} new this scan)"
+                       if cache_added else "")
+                )
             print(f"  → details in: {out}")
             if n_errors or n_skipped_listed:
                 hint = []
