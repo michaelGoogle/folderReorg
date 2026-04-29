@@ -63,11 +63,24 @@ def search(query: str,
            root: str | None = None,
            language: str | None = None,
            yymm_prefix: str | None = None,
-           compound_prefix: str | None = None) -> list[Source]:
+           compound_prefix: str | None = None,
+           qdrant_url: str | None = None,
+           collection: str | None = None) -> list[Source]:
+    """
+    Vector search.
+
+    `qdrant_url` and `collection` default to the values resolved at
+    import time from kb.config (which read KB_VARIANT once). Pass them
+    explicitly when the caller needs to switch variants per call —
+    e.g. the unified dashboard's chat page where the user toggles
+    Personal / 360F at runtime.
+    """
     from qdrant_client import QdrantClient
     from qdrant_client.http import models as qm
 
-    client = QdrantClient(url=QDRANT_URL)
+    url = qdrant_url or QDRANT_URL
+    coll = collection or QDRANT_COLLECTION
+    client = QdrantClient(url=url)
     qvec = embed([query])[0].tolist()
 
     must: list = []
@@ -85,7 +98,7 @@ def search(query: str,
 
     # qdrant-client >= 1.10 renamed `search` → `query_points`.
     result = client.query_points(
-        collection_name=QDRANT_COLLECTION,
+        collection_name=coll,
         query=qvec,
         query_filter=flt,
         limit=top_k,
