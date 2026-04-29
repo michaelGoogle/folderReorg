@@ -71,18 +71,51 @@ def _embedder():
     return SentenceTransformer(EMBED_MODEL, device="cuda")
 
 
+def _release_gpu_cache() -> None:
+    """
+    Force PyTorch's CUDA caching allocator to release unused buffers back
+    to the GPU driver after each embed() call. Without this, activation
+    memory from past batches accumulates inside PyTorch's private cache —
+    "free" from PyTorch's perspective but invisible to other processes
+    and to nvidia-smi. Over a long-running indexer scan with variable
+    chunk counts (different files → different tensor shapes), the cache
+    fragments and grows toward the GPU's physical capacity, eventually
+    causing 30-60 second stalls per batch as PyTorch fights for its own
+    memory back.
+
+    Cost: ~5-20 ms per call (GPU sync). Negligible for files that
+    embed in tens of milliseconds, completely irrelevant for files
+    that take seconds. Set KB_EMBED_RELEASE_CACHE=0 to disable
+    (e.g. for benchmarking or single-shot embed calls).
+    """
+    try:
+        import os, torch
+        if os.environ.get("KB_EMBED_RELEASE_CACHE", "1") in ("0", "false", "no"):
+            return
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        # Best-effort — never let a cache-release failure break embedding.
+        pass
+
+
 def embed(texts: list[str], *, batch_size: int = EMBED_BATCH_SIZE) -> np.ndarray:
     """
     Returns a [N, 1024] float32 numpy array of normalised bge-m3 embeddings.
+    Calls torch.cuda.empty_cache() after each invocation so GPU memory
+    stays bounded across long indexer runs (see _release_gpu_cache).
     """
     if not texts:
         return np.zeros((0, 1024), dtype=np.float32)
     model = _embedder()
-    vecs = model.encode(
-        texts,
-        batch_size=batch_size,
-        show_progress_bar=False,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-    )
-    return vecs.astype(np.float32)
+    try:
+        vecs = model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        return vecs.astype(np.float32)
+    finally:
+        _release_gpu_cache()
