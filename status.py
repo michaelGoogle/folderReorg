@@ -165,8 +165,12 @@ _STAGE_PATTERNS: list[tuple[str, str]] = [
     #   · python kb.py --variant X index   (initial full index)
     # cmd_reindex / cmd_index call scheduled.main() / delta_scan() in-process,
     # so the running command line is `python kb.py …` not `python -m kb.scheduled`.
+    #
+    # NOTE: pgrep uses POSIX ERE — \b (word boundary) and (?:...) (non-
+    # capturing group) are Perl-only and would error out the regex. Use
+    # plain alternation and capturing groups so pgrep accepts the pattern.
     ("KB indexer  (kb.scheduled / kb.py reindex)",
-     r"kb\.scheduled\b|kb\.py\b.*\b(?:re)?index\b"),
+     r"kb\.scheduled|kb\.py.*(reindex|index)"),
 ]
 
 
@@ -196,6 +200,7 @@ def section_currently_running(reap: bool = True) -> None:
     # 2. Active stage subprocess — with subset extraction
     active_label: str | None = None
     active_subset_hint: str | None = None
+    printed_any_stage = False     # True once we've rendered ANY stage line
     orphans_killed: list[tuple[str, list[str]]] = []
     for label, pat in _STAGE_PATTERNS:
         ls = pgrep(pat)
@@ -238,14 +243,17 @@ def section_currently_running(reap: bool = True) -> None:
                           + (f", up {etime}" if etime else "")
                           + f"{RESET}")
             print(f"  {marker} Stage:   {label}{detail}")
+            printed_any_stage = True
             # Heuristic: extract the --source argument as a subset hint
+            # (only useful for run.py-driven stages; kb.py reindex doesn't
+            # have --source — it iterates all roots under the variant).
             m = re.search(r"--source[ =]([^\s]+(?:\s+[^\s-][^\s]*)*)", cmd)
             if m and not active_subset_hint:
                 active_subset_hint = m.group(1).rstrip()
                 active_label = label
 
-    if not orphans_killed and active_label is None:
-        # Either nothing's running, or only the wizard is (between stages)
+    if not orphans_killed and not printed_any_stage:
+        # Nothing matched any stage pattern.
         if runpy_alive:
             print(f"  {DOT} Stage:   between stages")
         else:
