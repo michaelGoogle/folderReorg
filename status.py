@@ -159,7 +159,14 @@ _STAGE_PATTERNS: list[tuple[str, str]] = [
     ("Stage 6  Phase 3  LLM classify",     r"src\.phase3_classify"),
     ("Stage 8  Phase 5  execute (copy)",   r"src\.phase5_execute"),
     ("Stage 9  Phase 6  verify",           r"src\.phase6_verify"),
-    ("Stage 11 Phase 8  KB indexer",       r"kb\.scheduled"),
+    # KB indexer: matches all three invocations:
+    #   · python -m kb.scheduled          (timer-driven nightly run)
+    #   · python kb.py --variant X reindex (manual delta scan)
+    #   · python kb.py --variant X index   (initial full index)
+    # cmd_reindex / cmd_index call scheduled.main() / delta_scan() in-process,
+    # so the running command line is `python kb.py …` not `python -m kb.scheduled`.
+    ("KB indexer  (kb.scheduled / kb.py reindex)",
+     r"kb\.scheduled\b|kb\.py\b.*\b(?:re)?index\b"),
 ]
 
 
@@ -259,37 +266,58 @@ def section_currently_running(reap: bool = True) -> None:
     elif active_subset_hint:
         print(f"  {ARROW} Subset:  {DIM}{active_subset_hint}{RESET}")
 
-    # 4. GPU residency (one-line summary). `ollama ps` formats sizes as
-    # "6.0 GB" — two whitespace-separated tokens — so naive cell-by-cell
-    # split-and-suffix-match returns just "GB". Use a regex that matches
-    # the full "<number> <unit>" pair (with or without the space).
-    # We also flag UNEXPECTED models — anything that isn't qwen2.5:14b
-    # (Phase 3 / chat) or bge-m3 (embeddings) is external noise on the
-    # GPU, sometimes from manual `ollama run` testing or IDE plugins
-    # pointed at this Ollama instance. Setting these makes it obvious at
-    # a glance.
+    # 4. GPU residency + live load (one-or-two-line summary). For each
+    # model in `ollama ps`, print the model name + memory size, then a
+    # second line with utilization %, memory used, and temperature from
+    # nvidia-smi. We also flag UNEXPECTED models — anything not
+    # qwen2.5:14b (Phase 3 / chat) or bge-m3 (embeddings) is external
+    # noise (manual `ollama run`, IDE plugins, etc.).
     EXPECTED_MODEL_PREFIXES = ("qwen2.5:14b", "bge-m3")
     rc, out, _ = run(["ollama", "ps"])
-    if rc == 0 and out.strip():
-        lines = [l for l in out.splitlines() if l.strip()]
-        if len(lines) > 1:  # has data rows
-            size_re = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGT]B)\b")
-            for l in lines[1:]:
-                cells = l.split()
-                model = cells[0] if cells else "?"
-                m = size_re.search(l)
-                size = f"{m.group(1)} {m.group(2)}" if m else "?"
-                expected = any(model.startswith(p) for p in EXPECTED_MODEL_PREFIXES)
-                if expected:
-                    print(f"  {ARROW} GPU:     {model} resident ({size})")
-                else:
-                    print(f"  {WARN} GPU:     {model} resident ({size})  "
-                          f"{DIM}— NOT a folder-reorg model (qwen2.5:14b / "
-                          f"bge-m3 expected). External client?{RESET}")
-        else:
-            print(f"  {DOT} GPU:     idle")
-    else:
+    gpu_idle = (rc != 0) or (not out.strip()) or len(out.splitlines()) <= 1
+    rc_smi, smi, _ = run([
+        "nvidia-smi",
+        "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+        "--format=csv,noheader,nounits",
+    ])
+    smi_line = ""
+    if rc_smi == 0 and smi.strip():
+        # Line: "<util>, <mem_used>, <mem_total>, <temp>"
+        toks = [t.strip() for t in smi.splitlines()[0].split(",")]
+        if len(toks) == 4:
+            util, mem_used, mem_total, temp = toks
+            mem_used_gb = f"{int(mem_used)/1024:.1f}"
+            mem_total_gb = f"{int(mem_total)/1024:.1f}"
+            smi_line = (f"util {util}%, mem {mem_used_gb}/{mem_total_gb} GB, "
+                        f"temp {temp}°C")
+
+    if rc != 0:
         print(f"  {DOT} GPU:     ollama not reachable")
+        if smi_line:
+            print(f"           {DIM}{smi_line}{RESET}")
+    elif gpu_idle:
+        # No models resident, but GPU may still be holding memory from
+        # a just-finished workload — surface that via nvidia-smi
+        print(f"  {DOT} GPU:     no models resident in VRAM")
+        if smi_line:
+            print(f"           {DIM}{smi_line}{RESET}")
+    else:
+        lines = [l for l in out.splitlines() if l.strip()]
+        size_re = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGT]B)\b")
+        for l in lines[1:]:
+            cells = l.split()
+            model = cells[0] if cells else "?"
+            m = size_re.search(l)
+            size = f"{m.group(1)} {m.group(2)}" if m else "?"
+            expected = any(model.startswith(p) for p in EXPECTED_MODEL_PREFIXES)
+            if expected:
+                print(f"  {ARROW} GPU:     {model} resident ({size})")
+            else:
+                print(f"  {WARN} GPU:     {model} resident ({size})  "
+                      f"{DIM}— NOT a folder-reorg model (qwen2.5:14b / "
+                      f"bge-m3 expected). External client?{RESET}")
+        if smi_line:
+            print(f"           {DIM}{smi_line}{RESET}")
 
     # 5. Active NAS rsync
     rs = pgrep(r"rsync.*Data_Michael")
