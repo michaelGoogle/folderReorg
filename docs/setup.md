@@ -113,8 +113,8 @@ loopback), but if you also want LAN access from your laptop:
 
 ```bash
 sudo ufw allow OpenSSH
-sudo ufw allow 8502/tcp        # Personal chat UI (LAN)
-sudo ufw allow 8503/tcp        # 360F chat UI (LAN)
+sudo ufw allow 8052/tcp        # Personal chat UI (LAN)
+sudo ufw allow 8053/tcp        # 360F chat UI (LAN)
 sudo ufw enable
 sudo ufw status numbered
 ```
@@ -373,6 +373,44 @@ docker ps | grep qdrant
 # Expect: collection name + 0 points + green status
 ```
 
+### 5.1 Optional: run app services in containers
+
+Qdrant stays unchanged; app services are defined in
+`docker/compose.app.yml`:
+
+```bash
+cd ~/folderReorg
+
+# Build shared app image
+docker compose -f docker/compose.app.yml build
+
+# Start chat services
+docker compose -f docker/compose.app.yml up -d \
+  folderreorg-chat-personal folderreorg-chat-360f
+
+# Run KB command in container
+docker compose -f docker/compose.app.yml run --rm folderreorg-kb \
+  python kb.py --variant personal status
+
+# Run pipeline command in container
+docker compose -f docker/compose.app.yml run --rm folderreorg-pipeline \
+  python run.py --help
+```
+
+To use container-native reindex scheduling instead of systemd timers:
+
+```bash
+docker compose -f docker/compose.app.yml up -d \
+  folderreorg-kb-scheduler-personal folderreorg-kb-scheduler-360f
+```
+
+Set schedule overrides if needed:
+
+```bash
+export KB_REINDEX_PERSONAL_AT=01:45
+export KB_REINDEX_360F_AT=02:30
+```
+
 ---
 
 ## 6. Mount the NAS + first index
@@ -414,25 +452,25 @@ cd ~/folderReorg
 
 # Personal
 nohup env KB_VARIANT=personal .venv/bin/streamlit run chat_ui/chat_ui.py \
-    --server.address 127.0.0.1 --server.port 8502 \
+    --server.address 127.0.0.1 --server.port 8052 \
     --server.headless true --browser.gatherUsageStats false \
     > /tmp/streamlit-personal.log 2>&1 &
 
 # 360F
 nohup env KB_VARIANT=360f .venv/bin/streamlit run chat_ui/chat_ui.py \
-    --server.address 127.0.0.1 --server.port 8503 \
+    --server.address 127.0.0.1 --server.port 8053 \
     --server.headless true --browser.gatherUsageStats false \
     > /tmp/streamlit-360f.log 2>&1 &
 
 # Verify
-ss -lntp | grep -E ':8502|:8503'
+ss -lntp | grep -E ':8052|:8053'
 # Expect both listening on 127.0.0.1
 ```
 
 ### 7.2 LAN test (optional)
 
 If you opened the UFW ports in §1.4, you can reach the chat from your
-LAN at `http://<aizh-ip>:8502` and `…:8503` without Cloudflare. Useful
+LAN at `http://<aizh-ip>:8052` and `…:8053` without Cloudflare. Useful
 for in-house testing before the tunnel is set up.
 
 To survive reboots, see §9 (systemd) for a user-service unit.
@@ -489,9 +527,9 @@ credentials-file: /home/michael.gerber/.cloudflared/<UUID>.json   # replace <UUI
 
 ingress:
   - hostname: private.vitalus.net
-    service: http://127.0.0.1:8502
+    service: http://127.0.0.1:8052
   - hostname: 360f.vitalus.net
-    service: http://127.0.0.1:8503
+    service: http://127.0.0.1:8053
   - service: http_status:404
 EOF
 ```
@@ -602,7 +640,7 @@ during Phase 3 (qwen2.5:14b) and the KB scan (bge-m3), and finally the
 
 ### 10.3 Verify chat works
 
-Open `https://private.vitalus.net` (or `http://aizh:8502` over LAN).
+Open `https://private.vitalus.net` (or `http://aizh:8052` over LAN).
 Authenticate via email PIN. Ask a question relevant to the test subset.
 Sources should appear, with **Preview**, **Download**, and **Expand**
 options per source.
@@ -659,7 +697,7 @@ For the full operational reference, see [`run-on-aizh.md`](./run-on-aizh.md).
 | Stage 1 fails with "source folder not reachable" | NAS mount lost; `./kb.py umount && ./kb.py mount` and retry |
 | `.doc` files not extracted | `sudo apt install antiword` |
 | `.ppt` files not extracted | No lightweight option; the synthetic-context fallback indexes them by filename. If full-text needed, install LibreOffice (heavy) |
-| Streamlit unreachable from LAN | `sudo ufw allow 8502/tcp` (and 8503), or use SSH tunnel: `ssh -L 8502:localhost:8502 aizh` |
+| Streamlit unreachable from LAN | `sudo ufw allow 8052/tcp` (and 8053), or use SSH tunnel: `ssh -L 8052:localhost:8052 aizh` |
 | Cloudflare URL returns "Access blocked" | Email not in the Zero Trust Access policy — add it in the Cloudflare dashboard |
 | Systemd timers stop firing when you log out | `sudo loginctl enable-linger <user>` (one-time) |
 | `./status.py` shows orphaned worker processes | They auto-reap by default; `--no-reap` to inspect first |

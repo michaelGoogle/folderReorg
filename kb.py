@@ -27,6 +27,7 @@ Environment overrides (set before invocation):
   QDRANT_COLLECTION   default: folderreorg
   KB_LLM_MODEL        default: qwen2.5:14b-instruct-q4_K_M
   KB_EMBED_MODEL      default: BAAI/bge-m3
+  KB_STREAMLIT_BIN    default: streamlit
   KB_CHUNK_CHARS      default: 2000
   KB_OCR_LANGS        default: deu+eng
   KB_OCR_ENABLED      0 to disable OCR (PDFs + images)
@@ -129,8 +130,9 @@ def cmd_chat(args) -> int:
     from kb.config import UI_PORT, UI_LABEL
     port = str(args.port if args.port else UI_PORT)
     env = {**os.environ, "KB_VARIANT": args.variant}
+    streamlit_bin = os.environ.get("KB_STREAMLIT_BIN", "streamlit")
     argv = [
-        ".venv/bin/streamlit", "run", "chat_ui/chat_ui.py",
+        streamlit_bin, "run", "chat_ui/chat_ui.py",
         "--server.address", "0.0.0.0",
         "--server.port", port,
         "--server.headless", "true",

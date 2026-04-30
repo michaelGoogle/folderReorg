@@ -93,10 +93,33 @@ Day-to-day:
 .venv/bin/python kb.py --variant 360f remove --root F-Finance   # forget a subset from the KB
 ```
 
+Containerized app services (pipeline + KB + chats):
+
+```bash
+cd /home/michael.gerber/folderReorg
+
+# Start app stack (includes existing Qdrant via compose extends)
+docker compose -f docker/compose.app.yml up -d folderreorg-chat-personal folderreorg-chat-360f
+
+# One-off KB operations
+docker compose -f docker/compose.app.yml run --rm folderreorg-kb python kb.py --variant personal status
+docker compose -f docker/compose.app.yml run --rm folderreorg-kb python kb.py --variant 360f reindex
+
+# One-off pipeline run
+docker compose -f docker/compose.app.yml run --rm folderreorg-pipeline python run.py --help
+
+# Optional container-native schedulers (daily reindex)
+docker compose -f docker/compose.app.yml up -d folderreorg-kb-scheduler-personal folderreorg-kb-scheduler-360f
+```
+
 Public chat (after Cloudflare Tunnel + Access setup):
 
 - https://private.vitalus.net — Personal
 - https://360f.vitalus.net — 360F
+
+Rollback: stop/remove containerized app services and continue using host-native
+commands from the runbook (`./run.py`, `.venv/bin/python kb.py ...`,
+systemd timers under `systemd/`).
 
 ## Models
 

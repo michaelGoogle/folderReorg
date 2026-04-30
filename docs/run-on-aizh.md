@@ -485,13 +485,13 @@ The chat UIs are reachable from anywhere via:
 
 Authentication is handled by **Cloudflare Access** — an email-PIN flow
 covering the configured domains (no VPN, no port-forwarding). The chat
-processes themselves bind to `127.0.0.1:8502` / `:8503` on `aizh` and
+processes themselves bind to `127.0.0.1:8052` / `:8053` on `aizh` and
 are *not* directly exposed to the LAN or the internet — `cloudflared`
 proxies traffic over an outbound tunnel.
 
 LAN access still works for in-house testing:
-- http://192.168.1.10:8502 (Personal — requires `sudo ufw allow 8502/tcp`)
-- http://192.168.1.10:8503 (360F   — requires `sudo ufw allow 8503/tcp`)
+- http://192.168.1.10:8052 (Personal — requires `sudo ufw allow 8052/tcp`)
+- http://192.168.1.10:8053 (360F   — requires `sudo ufw allow 8053/tcp`)
 
 ---
 
@@ -542,7 +542,7 @@ pgrep -af "run\.py" | grep -v grep || echo "(not running)"
 
 # Chat Streamlit instances
 pgrep -af "streamlit run chat_ui" | grep -v grep
-ss -lntp | grep -E ":8502|:8503"
+ss -lntp | grep -E ":8052|:8053"
 
 # Plan size mid-Phase-3
 wc -l data/rename_plan.csv

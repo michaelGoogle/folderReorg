@@ -21,8 +21,8 @@ chat URLs, different systemd timers, different Cloudflare hostnames:
 
 | Variant | Indexes | Qdrant | Chat (LAN) | Chat (public) | Systemd timer |
 |---|---|---|---|---|---|
-| **personal** | `Data_Michael_restructured/Personal/*` | `localhost:6333`, collection `folderreorg_personal` | http://192.168.1.10:8502 | https://private.vitalus.net | `folderreorg-kb-personal.timer` (~02:00) |
-| **360f**     | `Data_Michael_restructured/360F/*`     | `localhost:6433`, collection `folderreorg_360f`     | http://192.168.1.10:8503 | https://360f.vitalus.net    | `folderreorg-kb-360f.timer`     (~02:15) |
+| **personal** | `Data_Michael_restructured/Personal/*` | `localhost:6333`, collection `folderreorg_personal` | http://192.168.1.10:8052 | https://private.vitalus.net | `folderreorg-kb-personal.timer` (~02:00) |
+| **360f**     | `Data_Michael_restructured/360F/*`     | `localhost:6433`, collection `folderreorg_360f`     | http://192.168.1.10:8053 | https://360f.vitalus.net    | `folderreorg-kb-360f.timer`     (~02:15) |
 
 The two stacks share only:
 - The SSHFS mount of the NAS (read-only, at `/home/michael.gerber/nas`)
@@ -43,8 +43,8 @@ Use `--variant {personal,360f}` on every `kb.py` command to pick the stack.
    ┌─────────────────────────────────────────────────────────────┐
    │  aizh                                                        │
    │                                                              │
-   │  Streamlit (127.0.0.1:8502  personal)    Ollama (:11434)     │
-   │  Streamlit (127.0.0.1:8503  360f)            qwen2.5:14b     │
+   │  Streamlit (127.0.0.1:8052  personal)    Ollama (:11434)     │
+   │  Streamlit (127.0.0.1:8053  360f)            qwen2.5:14b     │
    │      │                                       bge-m3          │
    │      ▼                                       ▲               │
    │  kb.query ──retrieve──► Qdrant ◄──────────indexer            │
@@ -98,8 +98,8 @@ cd /home/michael.gerber/folderReorg
 # --- Sudo bits ---
 sudo apt install -y tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng
 sudo apt install -y sshfs fuse3
-sudo ufw allow 8502/tcp                        # Personal chat (LAN)
-sudo ufw allow 8503/tcp                        # 360F chat (LAN)
+sudo ufw allow 8052/tcp                        # Personal chat (LAN)
+sudo ufw allow 8053/tcp                        # 360F chat (LAN)
 sudo loginctl enable-linger michael.gerber     # so user-timers fire when you log out
 
 # --- Python deps (in the venv) ---
@@ -128,20 +128,78 @@ systemctl --user list-timers 'folderreorg-kb-*.timer'
 
 # --- Launch the chat UIs (one per variant) ---
 nohup env KB_VARIANT=personal .venv/bin/streamlit run chat_ui/chat_ui.py \
-    --server.address 127.0.0.1 --server.port 8502 --server.headless true \
+    --server.address 127.0.0.1 --server.port 8052 --server.headless true \
     --browser.gatherUsageStats false > /tmp/streamlit-personal.log 2>&1 &
 nohup env KB_VARIANT=360f .venv/bin/streamlit run chat_ui/chat_ui.py \
-    --server.address 127.0.0.1 --server.port 8503 --server.headless true \
+    --server.address 127.0.0.1 --server.port 8053 --server.headless true \
     --browser.gatherUsageStats false > /tmp/streamlit-360f.log 2>&1 &
 
-# Personal → http://192.168.1.10:8502 + https://private.vitalus.net
-# 360F     → http://192.168.1.10:8503 + https://360f.vitalus.net
+# Personal → http://192.168.1.10:8052 + https://private.vitalus.net
+# 360F     → http://192.168.1.10:8053 + https://360f.vitalus.net
 ```
 
 > **Why bind to 127.0.0.1?** Cloudflare Tunnel reaches the chat servers
 > over the loopback interface, so binding to `0.0.0.0` would expose them
 > on the LAN as well. If you want LAN access in addition, change to
 > `--server.address 0.0.0.0`.
+
+## Containerized runtime (services 2/3/4)
+
+The repository now includes a compose stack for app services in
+`docker/compose.app.yml`:
+
+- `folderreorg-pipeline` → `run.py` container for on-demand pipeline runs
+- `folderreorg-kb` → `kb.py` container for on-demand index/query/status
+- `folderreorg-chat-personal` / `folderreorg-chat-360f` → Streamlit chat UIs
+- `folderreorg-kb-scheduler-personal` / `folderreorg-kb-scheduler-360f` →
+  container-native daily reindex loops (`02:00` / `02:15` by default)
+
+Bring up chat services:
+
+```bash
+cd ~/folderReorg
+docker compose -f docker/compose.app.yml up -d \
+  folderreorg-chat-personal folderreorg-chat-360f
+```
+
+Run one-off KB operations:
+
+```bash
+docker compose -f docker/compose.app.yml run --rm folderreorg-kb \
+  python kb.py --variant personal status
+docker compose -f docker/compose.app.yml run --rm folderreorg-kb \
+  python kb.py --variant 360f reindex
+```
+
+Run one-off pipeline operation:
+
+```bash
+docker compose -f docker/compose.app.yml run --rm folderreorg-pipeline \
+  python run.py --help
+```
+
+Start container-native schedulers:
+
+```bash
+docker compose -f docker/compose.app.yml up -d \
+  folderreorg-kb-scheduler-personal folderreorg-kb-scheduler-360f
+```
+
+Optional schedule overrides:
+
+- `KB_REINDEX_PERSONAL_AT=01:45`
+- `KB_REINDEX_360F_AT=02:30`
+
+The app containers mount NAS read-only from
+`${KB_NAS_MOUNT_HOST:-/home/michael.gerber/nas}` to `/nas` in-container.
+Override with `KB_NAS_MOUNT_HOST=/your/mount/path` before `docker compose`.
+
+Rollback to host-native operation:
+
+```bash
+docker compose -f docker/compose.app.yml down
+# then continue with .venv/systemd workflows in this document.
+```
 
 ### NAS mount details
 
@@ -376,7 +434,7 @@ in-collection chunk count (after deletes-and-reinserts of changed files).
   reachable. Both containers (personal:6333, 360f:6433) are loopback-only.
 - **Streamlit chat UIs bind to `127.0.0.1`**. Reached via Cloudflare
   Tunnel (`cloudflared`) over the loopback interface, OR via SSH tunnel
-  for stricter setups: `ssh -L 8502:localhost:8502 aizh`.
+  for stricter setups: `ssh -L 8052:localhost:8052 aizh`.
 - **Cloudflare Access** gates every request to `private.vitalus.net` /
   `360f.vitalus.net` — email PIN flow per session, configurable in the
   Cloudflare Zero Trust dashboard.
@@ -394,7 +452,7 @@ in-collection chunk count (after deletes-and-reinserts of changed files).
 | `./kb.py …` raises `ModuleNotFoundError` (tqdm, qdrant_client, …) | Use `.venv/bin/python kb.py …` or `source .venv/bin/activate` first |
 | `./kb.py setup` fails with "Cannot connect to Docker daemon" | `sudo systemctl start docker` and add user to `docker` group |
 | Index run very slow on PDFs | OCR is the bottleneck; `KB_OCR_ENABLED=0 .venv/bin/python kb.py reindex` to skip image-PDFs |
-| Chat UI unreachable from laptop (LAN) | `sudo ufw status` → ensure 8502/8503 allowed; or use SSH tunnel |
+| Chat UI unreachable from laptop (LAN) | `sudo ufw status` → ensure 8052/8053 allowed; or use SSH tunnel |
 | Chat UI unreachable from internet | Check `cloudflared` is running (`systemctl status cloudflared`) and the Access policy includes your email |
 | Qdrant collection lost after container restart | Confirm `qdrant_data/{personal,360f}/` directories persisted |
 | `pytesseract.TesseractNotFoundError` | `sudo apt install tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng` |

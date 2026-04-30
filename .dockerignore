@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.pyc
+data
+logs
+source_local
+target_local
+qdrant_data
+kb/data
+docs
+systemd
+*.pdf

@@ -43,9 +43,10 @@ from typing import Callable, Optional
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = ROOT / "data" / "runs"
-REVIEW_URL = "http://192.168.1.10:8501"
-NAS_HOST = "mgzh11"
-NAS_DST_ROOT = "/volume1/Data_Michael_restructured"
+REVIEW_URL = os.environ.get("RUNPY_REVIEW_URL", "http://192.168.1.10:8501")
+NAS_HOST = os.environ.get("RUNPY_NAS_HOST", "mgzh11")
+NAS_DST_ROOT = os.environ.get("RUNPY_NAS_DST_ROOT", "/volume1/Data_Michael_restructured")
+REVIEW_STREAMLIT_BIN = os.environ.get("RUNPY_STREAMLIT_BIN", "streamlit")
 LOGS_DIR = ROOT / "logs"
 
 # ---------------------------------------------------------------------------
@@ -1025,9 +1026,8 @@ def stage_phase4_review(ctx: Context) -> bool:
     # Kill any existing streamlit
     run_capture("pgrep -af streamlit | grep -v grep | awk '{print $1}' | xargs -r kill || true", shell=True)
     time.sleep(1)
-    venv_sl = ROOT / ".venv" / "bin" / "streamlit"
     argv = [
-        str(venv_sl), "run", str(ROOT / "review_ui" / "review_ui.py"),
+        REVIEW_STREAMLIT_BIN, "run", str(ROOT / "review_ui" / "review_ui.py"),
         "--server.address", "0.0.0.0",
         "--server.port", "8501",
         "--server.headless", "true",

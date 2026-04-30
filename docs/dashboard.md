@@ -73,7 +73,7 @@ else (chat, indexer, pipeline) — those are detached.
 ## Migrating away from the old chat UIs
 
 Once you've verified the dashboard works, you can decommission the
-two pre-existing Streamlit instances on `:8502` and `:8503`:
+two pre-existing Streamlit instances on `:8052` and `:8053`:
 
 ```bash
 ssh aizh
@@ -84,7 +84,7 @@ ssh aizh 'pgrep -af "streamlit run chat_ui"' || echo "(none)"
 
 # (Optional) update Cloudflare Tunnel ingress to point at :8500 for
 # both private.vitalus.net and 360f.vitalus.net:
-#   See ~/.cloudflared/config.yml — replace 8502/8503 service entries
+#   See ~/.cloudflared/config.yml — replace 8052/8053 service entries
 #   with a single 8500. Then `sudo systemctl restart cloudflared`.
 ```
 
