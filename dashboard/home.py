@@ -14,9 +14,14 @@ Launch (from repo root):
   ./dashboard/launch.sh
 
 Or manually:
-  .venv/bin/streamlit run dashboard/dashboard.py \\
+  .venv/bin/streamlit run dashboard/home.py \\
       --server.address 0.0.0.0 --server.port 8500 \\
       --server.headless true --browser.gatherUsageStats false
+
+NOTE: this file is named home.py (not dashboard.py) deliberately —
+Streamlit puts the script's parent dir on sys.path, so a script named
+dashboard.py inside dashboard/ collides with the dashboard package and
+breaks `from dashboard._common import …`.
 """
 from __future__ import annotations
 

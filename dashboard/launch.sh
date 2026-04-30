@@ -37,7 +37,7 @@ echo "  repo root: $ROOT"
 echo "  python:    $VENV_PY"
 echo
 
-exec "$VENV_PY" -m streamlit run dashboard/dashboard.py \
+exec "$VENV_PY" -m streamlit run dashboard/home.py \
     --server.address "$ADDR" \
     --server.port    "$PORT" \
     --server.headless         true \
