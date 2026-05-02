@@ -38,8 +38,7 @@ if (_HF_CACHE / "models--BAAI--bge-m3").exists() and "HF_HUB_OFFLINE" not in os.
 # NAS_MOUNT points to the SFTP chroot root (= NAS /volume1/). All shared
 # folders are visible directly under this path. Mount details: see
 # kb/mount_nas.sh (invoked by systemd ExecStartPre and `./kb.py mount`).
-_default_nas_mount = "/nas" if Path("/.dockerenv").exists() else "/home/michael.gerber/nas"
-NAS_MOUNT = Path(os.environ.get("KB_NAS_MOUNT", _default_nas_mount))
+NAS_MOUNT = Path(os.environ.get("KB_NAS_MOUNT", "/home/michael.gerber/nas"))
 
 
 # --- Variant selection ----------------------------------------------------
