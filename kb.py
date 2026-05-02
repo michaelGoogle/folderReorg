@@ -82,7 +82,7 @@ def cmd_umount(args) -> int:
 
 
 def cmd_index(args) -> int:
-    from kb.config import DEFAULT_ROOTS
+    from kb.config import DATA_DIR, DEFAULT_ROOTS
     from kb.indexer import delta_scan
     if args.path:
         roots = [(args.root or Path(args.path).name, Path(args.path))]
@@ -92,6 +92,14 @@ def cmd_index(args) -> int:
         print(f"=== index {name}  ({path}) ===")
         summary = delta_scan(name, path)
         print(json.dumps(summary, indent=2))
+        # Persist a per-root summary so the skipped[]/errors[] lists are
+        # inspectable after the fact (status.py --detail --root <NAME>,
+        # the dashboard's KB page, or just `cat kb/data/<variant>/last_scan_<NAME>.json`).
+        # Same path/format as kb.scheduled writes — they're interchangeable.
+        out = DATA_DIR / f"last_scan_{name}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        print(f"  → written: {out}")
     return 0
 
 

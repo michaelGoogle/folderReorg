@@ -16,7 +16,11 @@ Per-root flow after the per-file pass:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import signal
+import time
+import tomllib
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +37,102 @@ from kb.extract import extract
 
 # Stable namespace for deterministic point UUIDs (generated once, hardcoded).
 _UUID_NS = uuid.UUID("d94f0f11-7b25-4fc9-9c4c-0d39a8b4c12f")
+
+
+# --- Scan config (loaded from scan_config.toml at repo root) -------------
+# All four operational knobs (extension deny, max file size, per-file
+# timeout, auto-deny threshold) live in a TOML file you can edit without
+# touching code. Env vars still override per-run.
+#
+# Hierarchy (highest priority wins):
+#   1. Env var (KB_EXTENSION_DENY, KB_MAX_FILE_SIZE_MB, …)
+#   2. scan_config.toml entry
+#   3. Hard-coded fallback (only used when the file is missing or the key
+#      isn't present — kept minimal and safety-oriented)
+#
+# Override the file's location with KB_SCAN_CONFIG=/path/to/some.toml.
+_SCAN_CONFIG_PATH = Path(os.environ.get(
+    "KB_SCAN_CONFIG",
+    str(Path(__file__).resolve().parent.parent / "scan_config.toml"),
+))
+
+# Hard-coded fallback values — used ONLY when scan_config.toml is missing
+# or doesn't contain a given key. Keep these conservative; the canonical
+# defaults live in scan_config.toml.
+_FALLBACK_EXTENSION_DENY = (
+    ".xlsm",
+    ".mp4", ".avi", ".mov", ".mkv", ".webm",
+    ".png", ".jpg", ".jpeg",
+)
+_FALLBACK_MAX_FILE_SIZE_MB = 10.0
+_FALLBACK_FILE_TIMEOUT_SECONDS = 180
+_FALLBACK_AUTO_DENY_THRESHOLD = 0
+
+if _SCAN_CONFIG_PATH.is_file():
+    try:
+        with open(_SCAN_CONFIG_PATH, "rb") as _f:
+            _cfg = tomllib.load(_f)
+    except Exception as _e:
+        print(f"  ⚠ failed to parse {_SCAN_CONFIG_PATH}: {_e} — using fallbacks")
+        _cfg = {}
+else:
+    print(f"  ⚠ {_SCAN_CONFIG_PATH} not found — using fallback defaults")
+    _cfg = {}
+
+_file_ext_deny = tuple(_cfg.get("extension_deny", _FALLBACK_EXTENSION_DENY))
+_file_max_size_mb = float(_cfg.get("max_file_size_mb", _FALLBACK_MAX_FILE_SIZE_MB))
+_file_timeout_s = int(_cfg.get("file_timeout_seconds", _FALLBACK_FILE_TIMEOUT_SECONDS))
+_file_auto_deny = int(_cfg.get("auto_deny_threshold", _FALLBACK_AUTO_DENY_THRESHOLD))
+
+# Normalise extension entries: lower-case, prepend "." if missing.
+def _norm_ext(e: str) -> str:
+    e = e.strip().lower()
+    return e if e.startswith(".") else "." + e
+
+
+# Extension deny — env var REPLACES file's list entirely.
+_env_deny = os.environ.get("KB_EXTENSION_DENY")
+if _env_deny is None:
+    EXTENSION_DENY: frozenset[str] = frozenset(
+        _norm_ext(e) for e in _file_ext_deny if e and e.strip()
+    )
+elif _env_deny.strip() == "":
+    EXTENSION_DENY = frozenset()
+else:
+    EXTENSION_DENY = frozenset(
+        _norm_ext(x) for x in _env_deny.split(",") if x.strip()
+    )
+
+# Numeric knobs — env var overrides file value.
+MAX_FILE_SIZE_MB = float(
+    os.environ.get("KB_MAX_FILE_SIZE_MB", str(_file_max_size_mb))
+)
+MAX_FILE_SIZE_BYTES = int(MAX_FILE_SIZE_MB * 1024 * 1024) if MAX_FILE_SIZE_MB > 0 else 0
+
+FILE_TIMEOUT_SECONDS = int(
+    os.environ.get("KB_FILE_TIMEOUT_SECONDS", str(_file_timeout_s))
+)
+AUTO_DENY_THRESHOLD = int(
+    os.environ.get("KB_AUTO_DENY_THRESHOLD", str(_file_auto_deny))
+)
+# Legacy env var — only honored when neither KB_AUTO_DENY_THRESHOLD nor
+# the TOML's auto_deny_threshold key is "intentionally" set. Kept for
+# back-compat with anyone who set KB_AUTO_DENY_ON_TIMEOUT=0 in their env.
+if ("KB_AUTO_DENY_THRESHOLD" not in os.environ
+        and (os.environ.get("KB_AUTO_DENY_ON_TIMEOUT", "").strip().lower()
+             in ("0", "false", "no", "off"))):
+    AUTO_DENY_THRESHOLD = 0  # legacy disable still wins
+
+_HAS_SIGALRM = hasattr(signal, "SIGALRM")  # Linux/macOS only — not Windows
+
+
+class _FileProcessingTimeout(Exception):
+    """Raised by SIGALRM handler when a file exceeds FILE_TIMEOUT_SECONDS."""
+    pass
+
+
+def _alarm_handler(signum, frame):  # pragma: no cover (signal-driven)
+    raise _FileProcessingTimeout()
 
 # File-naming convention regex (same pattern as src/naming.py)
 _CONVENTION_RE = re.compile(
@@ -461,16 +561,135 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
     # Per-file deletion records (rel paths only — no ambiguity to capture).
     deleted_paths: list[str] = []
 
-    files = [p for p in root_path.rglob("*") if p.is_file()]
+    all_files = [p for p in root_path.rglob("*") if p.is_file()]
+    if EXTENSION_DENY:
+        files = [p for p in all_files if p.suffix.lower() not in EXTENSION_DENY]
+        n_denied = len(all_files) - len(files)
+        if n_denied:
+            print(f"  → ignoring {n_denied:,} of {len(all_files):,} file(s) "
+                  f"by KB_EXTENSION_DENY ({len(EXTENSION_DENY)} suffixes)")
+    else:
+        files = all_files
+        n_denied = 0
+
+    # File-size filter — apply AFTER extension deny (no point stat'ing files
+    # we already know we're skipping). Records up to MAX_TOO_BIG_RECORDED
+    # entries in the summary so you can see which large files were dropped.
+    too_big_records: list[dict] = []
+    MAX_TOO_BIG_RECORDED = 1000
+    if MAX_FILE_SIZE_BYTES > 0:
+        files_under_cap = []
+        n_too_big = 0
+        for p in files:
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                # If we can't stat the file, let downstream extract() decide.
+                files_under_cap.append(p)
+                continue
+            if sz > MAX_FILE_SIZE_BYTES:
+                n_too_big += 1
+                if len(too_big_records) < MAX_TOO_BIG_RECORDED:
+                    too_big_records.append({
+                        "path": str(p.relative_to(root_path)),
+                        "size_mb": round(sz / 1024 / 1024, 1),
+                    })
+            else:
+                files_under_cap.append(p)
+        files = files_under_cap
+        if n_too_big:
+            print(f"  → ignoring {n_too_big:,} file(s) larger than "
+                  f"{MAX_FILE_SIZE_MB:g} MB (KB_MAX_FILE_SIZE_MB)")
+    else:
+        n_too_big = 0
+
+    # Runtime extension stats — counts how many files of each extension
+    # have timed out so far. When a count reaches AUTO_DENY_THRESHOLD,
+    # that extension goes into runtime_deny and subsequent files with
+    # the same suffix are skipped without attempting to process them.
+    # With AUTO_DENY_THRESHOLD=0 (default) the runtime_deny set stays
+    # empty regardless of how many files time out.
+    runtime_deny: set[str] = set()
+    timeout_count_by_ext: dict[str, int] = {}
+    timeout_active = _HAS_SIGALRM and FILE_TIMEOUT_SECONDS > 0
+    if timeout_active:
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        if AUTO_DENY_THRESHOLD > 0:
+            policy = (f"after {AUTO_DENY_THRESHOLD} timeouts of the same "
+                      f"extension, deny that extension for the rest of the scan")
+        else:
+            policy = "skip the individual file only (no extension deny)"
+        print(f"  → per-file timeout: {FILE_TIMEOUT_SECONDS}s — {policy}")
+    elif FILE_TIMEOUT_SECONDS > 0:
+        print(f"  ⚠ per-file timeout requested ({FILE_TIMEOUT_SECONDS}s) "
+              f"but signal.SIGALRM is unavailable on this platform — disabled")
+
     for p in tqdm(files, unit="file", desc=f"index {root_name}"):
+        suffix = p.suffix.lower()
+        # Runtime deny check (an earlier file with this extension hung;
+        # don't bother trying any more of them this scan).
+        if suffix in runtime_deny:
+            counts["skip"] += 1
+            if len(skipped) < MAX_SKIPPED_RECORDED:
+                skipped.append({"path": str(p.relative_to(root_path)),
+                                "reason": f"runtime_deny:{suffix}"})
+            else:
+                skipped_overflow += 1
+            continue
         rel = p.relative_to(root_path)
         seen.add(str(rel))
+
+        # Arm timeout
+        if timeout_active:
+            signal.alarm(FILE_TIMEOUT_SECONDS)
+        t0 = time.monotonic()
         try:
             status, nc = index_file(client, root_name, root_path, rel,
                                     existing.get(str(rel)))
+        except _FileProcessingTimeout:
+            elapsed = time.monotonic() - t0
+            if timeout_active:
+                signal.alarm(0)
+            # Try to free GPU state that may be half-allocated from an
+            # interrupted embed batch.
+            try:
+                from kb.chunk_embed import _release_gpu_cache
+                _release_gpu_cache()
+            except Exception:
+                pass
+            counts["skip"] += 1
+            reason = f"timeout:{elapsed:.0f}s"
+            if len(skipped) < MAX_SKIPPED_RECORDED:
+                skipped.append({"path": str(rel), "reason": reason})
+            else:
+                skipped_overflow += 1
+            print(f"\n  ⚠ TIMEOUT after {elapsed:.0f}s on {rel}", flush=True)
+            # Track timeouts per extension. Only auto-deny when the count
+            # reaches the (opt-in) threshold — by default the threshold
+            # is 0, which means we never auto-deny based on extension and
+            # each timeout only skips that one file.
+            if suffix:
+                timeout_count_by_ext[suffix] = (
+                    timeout_count_by_ext.get(suffix, 0) + 1
+                )
+                if (AUTO_DENY_THRESHOLD > 0
+                        and timeout_count_by_ext[suffix] >= AUTO_DENY_THRESHOLD
+                        and suffix not in runtime_deny):
+                    runtime_deny.add(suffix)
+                    print(f"  ⚠ {timeout_count_by_ext[suffix]} '{suffix}' files "
+                          f"timed out — adding '{suffix}' to runtime deny list; "
+                          f"subsequent {suffix} files in this scan will be skipped",
+                          flush=True)
+            continue
         except Exception as e:
+            if timeout_active:
+                signal.alarm(0)
             errors.append(f"{rel}: {e}")
             continue
+        else:
+            if timeout_active:
+                signal.alarm(0)
+
         if status.startswith("skip:"):
             counts["skip"] += 1
             reason = status.split(":", 1)[1] if ":" in status else "unknown"
@@ -481,6 +700,10 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
         else:
             counts[status] = counts.get(status, 0) + 1
             counts["chunks_added"] += nc
+
+    # Disarm any leftover alarm before the deletion sweep.
+    if timeout_active:
+        signal.alarm(0)
 
     # Delete chunks for files no longer present
     disappeared = set(existing) - seen
@@ -496,6 +719,15 @@ def delta_scan(root_name: str, root_path: Path) -> dict:
     counts["root"] = root_name
     counts["root_path"] = str(root_path)
     counts["scanned_files"] = len(files)
+    counts["ignored_by_deny"] = n_denied
+    counts["deny_extensions"] = sorted(EXTENSION_DENY)
+    counts["ignored_too_big"] = n_too_big
+    counts["max_file_size_mb"] = MAX_FILE_SIZE_MB if MAX_FILE_SIZE_BYTES > 0 else 0
+    counts["too_big_files"] = too_big_records
+    counts["runtime_denied_extensions"] = sorted(runtime_deny)
+    counts["timeout_count_by_extension"] = dict(sorted(timeout_count_by_ext.items()))
+    counts["file_timeout_seconds"] = FILE_TIMEOUT_SECONDS if timeout_active else 0
+    counts["auto_deny_threshold"] = AUTO_DENY_THRESHOLD
     counts["scanned_at"] = datetime.now().isoformat(timespec="seconds")
     return counts
 

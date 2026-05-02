@@ -1,0 +1,102 @@
+# =============================================================================
+# folderReorg — KB indexer scan configuration
+# =============================================================================
+#
+# This file controls what the indexer SKIPS during a scan and how it bails
+# out of pathological files. Read at the start of every kb.py / kb.scheduled
+# / run.py invocation. Edit, save, re-run — no code changes needed.
+#
+# Default location:  <repo-root>/scan_config.toml
+# Override location: KB_SCAN_CONFIG=/path/to/some.toml
+#
+# Per-run env-var overrides still work and take PRECEDENCE over this file.
+# That's by design — you can leave the file alone and just tweak one knob
+# for one invocation. The mapping is documented next to each setting.
+#
+# To see what's actually in effect at runtime:
+#   .venv/bin/python -c "from kb.indexer import EXTENSION_DENY, \
+#     MAX_FILE_SIZE_MB, FILE_TIMEOUT_SECONDS, AUTO_DENY_THRESHOLD; \
+#     print('deny:', sorted(EXTENSION_DENY)); \
+#     print('size_mb:', MAX_FILE_SIZE_MB); \
+#     print('timeout_s:', FILE_TIMEOUT_SECONDS); \
+#     print('auto_deny_threshold:', AUTO_DENY_THRESHOLD)"
+#
+# After every scan the effective values are also persisted into:
+#   kb/data/<variant>/last_scan_<root>.json
+# under the keys: deny_extensions, max_file_size_mb, file_timeout_seconds,
+# auto_deny_threshold.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# extension_deny
+# -----------------------------------------------------------------------------
+# Files whose extension (case-insensitive) matches an entry in this list are
+# excluded BEFORE any extraction work. They never appear in the per-file
+# `skipped[]` list — they're just gone from the scan universe. Use this for
+# file types that have no useful text content (videos, images you don't
+# want OCR'd) OR types known to hang the extractor.
+#
+# Override per-run:  KB_EXTENSION_DENY=".xlsm,.zip"
+#                    (REPLACES the list; empty string "" disables filtering)
+#
+# Leading dot is optional in this file (".pdf" and "pdf" both work). The
+# loader normalises everything to lower-case with a leading dot.
+extension_deny = [
+    # ---- Spreadsheets-with-macros ----
+    # openpyxl hangs on big .xlsm files with Conditional Formatting matrices.
+    # Root cause of the C-Client May 2026 scheduled-scan hang.
+    ".xlsm",
+
+    # ---- Video ----
+    # No text to extract; saves a stat-and-dispatch per file.
+    ".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v", ".wmv", ".flv",
+
+    # ---- Images ----
+    # By default the OCR pipeline would handle these. Excluded here so big
+    # PNG/JPG dumps don't dominate scan time. Re-include by removing.
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
+    ".tiff", ".tif", ".heic", ".svg", ".ico",
+]
+
+
+# -----------------------------------------------------------------------------
+# max_file_size_mb
+# -----------------------------------------------------------------------------
+# Skip files larger than this (megabytes). Catches multi-MB CSV/XLSX/PDF
+# files that tend to either time out during extraction (millions of tokens)
+# or produce embed batches large enough to thrash VRAM. The C-Client hang
+# was triggered by a 14.7 MB CSV — 10 MB is a defensible defense.
+#
+# Skipped files are listed in `too_big_files[]` in the per-root JSON.
+#
+# Override per-run:  KB_MAX_FILE_SIZE_MB=25  (or 0 to disable)
+max_file_size_mb = 10
+
+
+# -----------------------------------------------------------------------------
+# file_timeout_seconds
+# -----------------------------------------------------------------------------
+# Per-file wall-clock cap. When exceeded, the file is skipped and recorded
+# as `timeout:Ns` in the per-root JSON's `skipped[]` list. Implemented via
+# signal.SIGALRM; preempts at the next Python bytecode boundary, so works
+# for hangs in pure-Python extractors (the most common failure mode).
+#
+# Override per-run:  KB_FILE_TIMEOUT_SECONDS=300  (or 0 to disable)
+file_timeout_seconds = 180
+
+
+# -----------------------------------------------------------------------------
+# auto_deny_threshold
+# -----------------------------------------------------------------------------
+# After this many timeouts of the SAME extension during one scan, that
+# extension goes onto a runtime deny list and the rest of the files of that
+# type are skipped without being attempted. 0 = NEVER auto-deny based on
+# extension; a timeout only ever skips that one file (recommended default —
+# earlier behaviour with effective threshold = 1 was too coarse).
+#
+# Override per-run:  KB_AUTO_DENY_THRESHOLD=5
+#                    (sensible non-zero value; "if 5 different files of the
+#                     same type all hit the timeout, treat the type as
+#                     systemically pathological")
+auto_deny_threshold = 0
