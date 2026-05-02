@@ -57,6 +57,14 @@ extension_deny = [
     # PNG/JPG dumps don't dominate scan time. Re-include by removing.
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
     ".tiff", ".tif", ".heic", ".svg", ".ico",
+
+    # ---- Raw-data files (no know-how, just data) ----
+    # CSVs are typically exports / production logs / mapping tables — high
+    # token count, low semantic value for retrieval. Same story for .dat
+    # (binary or fixed-format application data) and .log (timestamped
+    # event streams). The C-Client May 2026 timeouts both came from
+    # multi-MB files in this category.
+    ".csv", ".dat", ".log",
 ]
 
 
